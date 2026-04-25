@@ -91,8 +91,19 @@ DISCORD_BOT_TOKEN=your-discord-bot-token
 DISCORD_APPLICATION_ID=your-application-id
 DISCORD_GUILD_ID=your-server-id        # 선택 사항
 
+# 응답 허용할 Discord User ID (쉼표 구분, 필수)
+# 비워두면 모든 메시지를 무시합니다 (화이트리스트 방식)
+# Discord 설정 → 고급 → 개발자 모드 ON → 본인 프로필 우클릭 → "Copy User ID"
+ALLOWED_USERS=123456789012345678
+
 # LLM 어댑터 (기본값: claude)
 LLM_ADAPTER=claude
+
+# 메모리 모드 (기본값: auto). manual = 사용자가 명시적으로 요청 시만 추출
+MEMORY_MODE=auto
+
+# 세션 idle 타임아웃 분 (기본값: 1440 = 24시간)
+SESSION_IDLE_TIMEOUT=1440
 ```
 
 > **주의**: `.env` 파일은 절대 git에 커밋하지 마세요. `.gitignore`에 이미 포함되어 있습니다.
@@ -237,16 +248,23 @@ health-manager/
 ├── bot/
 │   └── main.py              ← 봇 엔트리포인트
 ├── core/
-│   ├── llm.py               ← LLM 어댑터 (ClaudeSDKAdapter)
-│   ├── channel.py           ← 채널 추상화 (DiscordChannel)
-│   ├── garmin_data.py       ← GarminDB SQLite 쿼리
-│   ├── inbody_data.py       ← InBody CSV CRUD
-│   ├── inbody_parser.py     ← 자연어 InBody 파싱
-│   ├── preprocessor.py      ← 로컬 전처리 (통계 요약)
-│   └── report.py            ← 주간/월간 리포트 생성
+│   ├── llm.py                  ← LLM 어댑터 (ClaudeSDKAdapter)
+│   ├── channel.py              ← 채널 추상화 (DiscordChannel)
+│   ├── garmin_data.py          ← Garmin Connect API 클라이언트
+│   ├── garmin_tools.py         ← Garmin MCP 도구 (Claude가 호출)
+│   ├── body_metrics.py         ← Body Metrics CSV CRUD
+│   ├── body_metrics_parser.py  ← 자연어 InBody 파싱
+│   ├── body_metrics_tools.py   ← Body Metrics MCP 도구
+│   ├── preprocessor.py         ← 로컬 전처리 (통계 요약)
+│   ├── report.py               ← 주간/월간 리포트 생성
+│   ├── memory.py               ← 영구 메모리 관리
+│   ├── context_compressor.py   ← 대화 이력 LLM 압축
+│   └── session_manager.py      ← 스레드 세션 타임아웃
 ├── prompts/
 │   ├── system.md            ← AI 건강 전문가 페르소나
-│   └── goals.md             ← 개인 건강 목표 (수정 가능)
+│   ├── goals.md             ← 개인 건강 목표 (수정 가능)
+│   ├── memory.md            ← 자동 추출된 환경/패턴 메모리
+│   └── user.md              ← 자동 추출된 사용자 선호도
 ├── garmindb/
 │   └── sync.sh              ← Garmin 데이터 동기화 스크립트
 ├── scripts/
@@ -254,7 +272,7 @@ health-manager/
 │   └── backup.sh            ← SQLite → SQL 덤프 백업
 ├── data/                    ← 데이터 저장 (SQLite, inbody.csv)
 ├── backups/                 ← SQL 덤프 백업 파일
-├── tests/                   ← 테스트 (64개)
+├── tests/                   ← 테스트
 ├── .env                     ← 환경변수 (시크릿, git 미포함)
 ├── .env.example             ← 환경변수 예시
 ├── requirements.txt         ← Python 의존성
@@ -301,10 +319,10 @@ Claude AI는 `prompts/goals.md`에 정의된 개인 목표를 참고하여 분�
 # prompts/goals.md 예시
 
 ## 현재 목표
-- 체지방률 15% 이하 유지
-- 주 4회 이상 운동
+- 목표 체중 92kg를 향해 다이어트 (시작 몸무게 107kg)
+- 골격근량 최대로 유지하며 다이어트 (시작 골격근량 41.5kg 수준)
+- 러닝 능력치 향상
 - 평균 수면 7시간 이상
-- 안정시 심박수 55 이하
 ```
 
 봇을 재시작할 필요 없이 다음 질의 시점부터 반영됩니다.
@@ -345,7 +363,7 @@ bash garmindb/sync.sh
 python3 -m pytest tests/ -v
 ```
 
-64개 테스트가 모두 통과하면 정상입니다.
+모든 테스트가 통과하면 정상입니다.
 
 ### 데이터 백업 수동 실행
 

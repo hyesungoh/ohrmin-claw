@@ -55,6 +55,7 @@ prompts/        시스템 프롬프트 (system.md) + 개인 목표 (goals.md) + 
 - **영구 메모리**: `prompts/memory.md`(환경/패턴) + `prompts/user.md`(사용자 선호도)에 LLM이 자동 추출한 장기 기억을 저장. `MEMORY_MODE=auto|manual`로 모드 전환. 시스템 프롬프트에 자동 포함.
 - **컨텍스트 압축**: 대화 이력이 20개 초과 시 중간 구간을 LLM으로 요약. 첫 메시지(1개) + 최근 메시지(6개)는 원본 보호. Hermes 방식.
 - **세션 타임아웃**: 스레드 idle 24시간(기본) 초과 시 히스토리 미로드하여 새 세션 취급. `SESSION_IDLE_TIMEOUT` 환경변수로 조정 가능.
+- **유저 화이트리스트**: `ALLOWED_USERS` 환경변수(쉼표 구분 Discord User ID)에 등록된 사용자만 응답. 빈 값이면 모든 메시지 무시 (안전 기본값).
 
 ## Data Sources
 
@@ -73,6 +74,7 @@ prompts/        시스템 프롬프트 (system.md) + 개인 목표 (goals.md) + 
 - `DISCORD_BOT_TOKEN` / `DISCORD_APPLICATION_ID` — Discord 봇
 - `LLM_ADAPTER` — `claude` (기본)
 - `LLM_MODEL` — 사용할 모델 (선택, 기본값: `claude-sonnet-4-20250514`)
+- `ALLOWED_USERS` — 응답 허용할 Discord User ID (쉼표 구분, 필수). 비워두면 모든 메시지 무시
 - `MEMORY_MODE` — `auto` (기본, 대화 후 자동 추출) | `manual` (명시적 요청 시만)
 - `SESSION_IDLE_TIMEOUT` — 세션 idle 타임아웃 분 (기본: `1440` = 24시간)
 - Claude CLI 로그인 필요: `claude login`
