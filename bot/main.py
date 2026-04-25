@@ -17,6 +17,9 @@ from core.body_metrics_tools import create_body_metrics_mcp_server
 from core.preprocessor import HealthPreprocessor
 from core.report import ReportGenerator
 from core.channel import DiscordChannel
+from core.memory import MemoryManager
+from core.context_compressor import ContextCompressor
+from core.session_manager import SessionManager
 
 
 load_dotenv()
@@ -31,6 +34,24 @@ GARMIN_TOKEN_DIR = os.path.expanduser("~/.garminconnect")
 BODY_METRICS_CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "inbody.csv")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts")
+MEMORY_MODE = os.getenv("MEMORY_MODE", "auto")  # auto | manual
+SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "1440"))  # 분 (기본 24시간)
+
+
+def parse_allowed_users(raw: str) -> set[int]:
+    """쉼표로 구분된 유저 ID 문자열을 정수 집합으로 파싱."""
+    result = set()
+    for uid in raw.split(","):
+        uid = uid.strip()
+        if uid:
+            try:
+                result.add(int(uid))
+            except ValueError:
+                print(f"⚠️ ALLOWED_USERS에 유효하지 않은 값: {uid!r}")
+    return result
+
+
+ALLOWED_USERS: set[int] = parse_allowed_users(os.getenv("ALLOWED_USERS", ""))
 
 
 def load_prompt(filename: str) -> str:
@@ -68,6 +89,11 @@ mcp_servers.append(body_metrics_mcp)
 
 # LLM 어댑터
 llm = create_llm_adapter(LLM_ADAPTER_TYPE, model=LLM_MODEL, mcp_servers=mcp_servers or None, cwd=PROJECT_ROOT)
+
+# 메모리, 컨텍스트 압축, 세션 관리
+memory_mgr = MemoryManager(PROMPTS_DIR)
+context_compressor = ContextCompressor()
+session_mgr = SessionManager(idle_timeout_minutes=SESSION_IDLE_TIMEOUT)
 
 # 채널 추상화를 통한 Discord 봇
 channel = DiscordChannel(token=DISCORD_TOKEN or "")
@@ -123,7 +149,16 @@ async def handle_health_query(message: discord.Message, content: str):
     """스레드 기반 자연어 건강 질의 처리. TextBlock마다 즉시 전송."""
     system_prompt = load_prompt("system.md")
     goals = load_prompt("goals.md")
-    full_system = f"{system_prompt}\n\n{goals}"
+
+    # 메모리를 시스템 프롬프트에 포함
+    parts = [system_prompt, goals]
+    mem = memory_mgr.read_memory()
+    usr = memory_mgr.read_user()
+    if mem:
+        parts.append(f"[기억]\n{mem}")
+    if usr:
+        parts.append(f"[사용자 프로필]\n{usr}")
+    full_system = "\n\n".join(p for p in parts if p)
 
     context = _collect_health_context()
 
@@ -131,9 +166,22 @@ async def handle_health_query(message: discord.Message, content: str):
 
     if is_thread:
         target = message.channel
-        history = await build_history_from_thread(message.channel, exclude_last=True)
+        thread_id = target.id
+
+        # 세션 타임아웃 확인
+        if session_mgr.is_expired(thread_id):
+            session_mgr.clear(thread_id)
+            history = None
+        else:
+            history = await build_history_from_thread(message.channel, exclude_last=True)
+            # 컨텍스트 압축
+            if history:
+                history = await context_compressor.compress(history, llm)
+
+        session_mgr.update_activity(thread_id)
     else:
         target = await message.create_thread(name=content[:100])
+        session_mgr.update_activity(target.id)
         history = None
 
     async def on_text(text: str):
@@ -145,6 +193,13 @@ async def handle_health_query(message: discord.Message, content: str):
             history=history,
             on_text=on_text,
         )
+
+    # auto 모드: 대화에서 메모리 추출
+    if MEMORY_MODE == "auto":
+        conversation = [{"role": "user", "content": content}]
+        if history:
+            conversation = history + conversation
+        await memory_mgr.extract_and_save(llm, conversation)
 
 
 async def generate_weekly_report() -> str:
@@ -203,6 +258,10 @@ async def on_message(message: discord.Message):
     if message.author == channel._client.user:
         return
 
+    # 허용된 유저만 응답 (화이트리스트)
+    if message.author.id not in ALLOWED_USERS:
+        return
+
     content = message.content.strip()
     if not content:
         return
@@ -223,6 +282,10 @@ def main():
         print("❌ DISCORD_BOT_TOKEN이 설정되지 않았습니다. .env 파일을 확인하세요.")
         sys.exit(1)
     print("🚀 Health Manager 봇 시작...")
+    if ALLOWED_USERS:
+        print(f"🔒 허용된 유저: {len(ALLOWED_USERS)}명")
+    else:
+        print("⚠️ ALLOWED_USERS가 비어있습니다. 모든 메시지가 무시됩니다.")
     channel.run()
 
 

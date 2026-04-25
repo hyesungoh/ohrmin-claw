@@ -34,9 +34,12 @@ core/           추상화 레이어 + 데이터 접근
   body_metrics_tools.py  Body Metrics MCP tool 정의
   preprocessor.py  원시 데이터 → 통계 요약 (평균, 트렌드, 이상치)
   report.py        주간/월간 마크다운 리포트 생성
+  memory.py        영구 메모리 관리 (prompts/memory.md + prompts/user.md, Hermes식)
+  context_compressor.py  대화 이력 압축 (보호 구간 + LLM 요약)
+  session_manager.py     세션 타임아웃 관리 (idle 24시간 기본)
 
 bot/main.py     Discord 봇 엔트리포인트 (스레드 기반 대화 세션)
-prompts/        시스템 프롬프트 (system.md) + 개인 목표 (goals.md), 마크다운 분리
+prompts/        시스템 프롬프트 (system.md) + 개인 목표 (goals.md) + 메모리 (memory.md, user.md)
 .claude/skills/ 전문 분석 스킬 파일 (운동평가, 수면분석, 체성분, 과학기준)
 ```
 
@@ -49,6 +52,9 @@ prompts/        시스템 프롬프트 (system.md) + 개인 목표 (goals.md), �
 - **범용 에이전트**: `allowed_tools`에 빌트인 도구(Bash, Read, Glob 등) + Skill을 포함하여 건강 질의뿐 아니라 일반 질문에도 응답 가능.
 - **.claude/skills 패턴**: 전문 분석 프레임워크를 `.claude/skills/`에 마크다운으로 분리. `setting_sources=["user", "project"]`로 Claude가 스킬을 자동 인식. system.md는 핵심 페르소나만 유지.
 - **프롬프트 분리**: `prompts/system.md`(페르소나)와 `prompts/goals.md`(개인 목표)를 마크다운으로 분리. 봇 재시작 없이 goals.md만 수정하면 반영됨.
+- **영구 메모리**: `prompts/memory.md`(환경/패턴) + `prompts/user.md`(사용자 선호도)에 LLM이 자동 추출한 장기 기억을 저장. `MEMORY_MODE=auto|manual`로 모드 전환. 시스템 프롬프트에 자동 포함.
+- **컨텍스트 압축**: 대화 이력이 20개 초과 시 중간 구간을 LLM으로 요약. 첫 메시지(1개) + 최근 메시지(6개)는 원본 보호. Hermes 방식.
+- **세션 타임아웃**: 스레드 idle 24시간(기본) 초과 시 히스토리 미로드하여 새 세션 취급. `SESSION_IDLE_TIMEOUT` 환경변수로 조정 가능.
 
 ## Data Sources
 
@@ -67,6 +73,8 @@ prompts/        시스템 프롬프트 (system.md) + 개인 목표 (goals.md), �
 - `DISCORD_BOT_TOKEN` / `DISCORD_APPLICATION_ID` — Discord 봇
 - `LLM_ADAPTER` — `claude` (기본)
 - `LLM_MODEL` — 사용할 모델 (선택, 기본값: `claude-sonnet-4-20250514`)
+- `MEMORY_MODE` — `auto` (기본, 대화 후 자동 추출) | `manual` (명시적 요청 시만)
+- `SESSION_IDLE_TIMEOUT` — 세션 idle 타임아웃 분 (기본: `1440` = 24시간)
 - Claude CLI 로그인 필요: `claude login`
 
 의존성:

@@ -104,8 +104,14 @@ class TestOnMessageCreatesThread:
         with patch("bot.main.llm") as mock_llm, \
              patch("bot.main.load_prompt", return_value="시스템"), \
              patch("bot.main.garmin", None), \
-             patch("bot.main.body_metrics_mgr") as mock_body_metrics:
+             patch("bot.main.body_metrics_mgr") as mock_body_metrics, \
+             patch("bot.main.memory_mgr") as mock_mem, \
+             patch("bot.main.session_mgr") as mock_sess, \
+             patch("bot.main.context_compressor") as mock_comp, \
+             patch("bot.main.MEMORY_MODE", "manual"):
             mock_body_metrics.read_latest.return_value = None
+            mock_mem.read_memory.return_value = ""
+            mock_mem.read_user.return_value = ""
 
             async def fake_ask(*, on_text=None, **kwargs):
                 if on_text:
@@ -134,9 +140,17 @@ class TestOnMessageCreatesThread:
         with patch("bot.main.llm") as mock_llm, \
              patch("bot.main.load_prompt", return_value="시스템"), \
              patch("bot.main.garmin", None), \
-             patch("bot.main.body_metrics_mgr") as mock_body_metrics:
+             patch("bot.main.body_metrics_mgr") as mock_body_metrics, \
+             patch("bot.main.memory_mgr") as mock_mem, \
+             patch("bot.main.session_mgr") as mock_sess, \
+             patch("bot.main.context_compressor") as mock_comp, \
+             patch("bot.main.MEMORY_MODE", "manual"):
             mock_llm.ask_with_context = AsyncMock(return_value="후속 응답")
             mock_body_metrics.read_latest.return_value = None
+            mock_mem.read_memory.return_value = ""
+            mock_mem.read_user.return_value = ""
+            mock_sess.is_expired.return_value = False
+            mock_comp.compress = AsyncMock(side_effect=lambda msgs, llm: msgs)
 
             await handle_health_query(mock_message, "후속 질문")
 
@@ -160,8 +174,14 @@ class TestStreamingSendToDiscord:
         with patch("bot.main.llm") as mock_llm, \
              patch("bot.main.load_prompt", return_value="시스템"), \
              patch("bot.main.garmin", None), \
-             patch("bot.main.body_metrics_mgr") as mock_body_metrics:
+             patch("bot.main.body_metrics_mgr") as mock_body_metrics, \
+             patch("bot.main.memory_mgr") as mock_mem, \
+             patch("bot.main.session_mgr") as mock_sess, \
+             patch("bot.main.context_compressor") as mock_comp, \
+             patch("bot.main.MEMORY_MODE", "manual"):
             mock_body_metrics.read_latest.return_value = None
+            mock_mem.read_memory.return_value = ""
+            mock_mem.read_user.return_value = ""
 
             # ask_with_context가 on_text 콜백을 받아서 호출하는 것을 시뮬레이션
             async def fake_ask_with_context(*args, on_text=None, **kwargs):
@@ -192,9 +212,15 @@ class TestStreamingSendToDiscord:
         with patch("bot.main.llm") as mock_llm, \
              patch("bot.main.load_prompt", return_value="시스템"), \
              patch("bot.main.garmin", None), \
-             patch("bot.main.body_metrics_mgr") as mock_body_metrics:
+             patch("bot.main.body_metrics_mgr") as mock_body_metrics, \
+             patch("bot.main.memory_mgr") as mock_mem, \
+             patch("bot.main.session_mgr") as mock_sess, \
+             patch("bot.main.context_compressor") as mock_comp, \
+             patch("bot.main.MEMORY_MODE", "manual"):
             mock_llm.ask_with_context = AsyncMock(return_value="응답")
             mock_body_metrics.read_latest.return_value = None
+            mock_mem.read_memory.return_value = ""
+            mock_mem.read_user.return_value = ""
 
             await handle_health_query(mock_message, "질문")
 
