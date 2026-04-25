@@ -1,0 +1,6 @@
+.env
+.omc
+.omx
+*.log
+__pycache__/
+.pytest_cache/

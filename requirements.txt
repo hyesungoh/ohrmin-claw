@@ -1,0 +1,20 @@
+# Health Manager Dependencies
+
+# Garmin data
+garmindb
+
+# Discord bot
+discord.py
+
+# Data processing
+pandas
+
+# LLM
+claude-agent-sdk
+
+# Environment
+python-dotenv
+
+# Testing
+pytest
+pytest-asyncio
