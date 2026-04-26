@@ -4,3 +4,5 @@
 *.log
 __pycache__/
 .pytest_cache/
+prompts/memory.md
+prompts/user.md
