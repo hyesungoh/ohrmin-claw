@@ -374,19 +374,33 @@ def mock_async_gen(items):
 # ── Task 3: MCP servers passthrough ──────────────────
 
 class TestMcpServersPassthrough:
-    """ClaudeSDKAdapter가 mcp_servers를 ClaudeAgentOptions에 전달하는지 확인."""
+    """ClaudeSDKAdapter가 mcp_servers를 dict[str, McpSdkServerConfig] 형태로 전달하는지 확인."""
 
     @pytest.mark.asyncio
-    async def test_mcp_servers_passed_to_options(self):
-        mock_server = {"type": "sdk", "name": "garmin", "instance": None}
-        adapter = ClaudeSDKAdapter(mcp_servers=[mock_server])
+    async def test_mcp_servers_passed_as_dict(self):
+        """mcp_servers는 dict[str, config] 형태로 ClaudeAgentOptions에 전달되어야 함."""
+        mock_servers = {
+            "garmin": {"type": "sdk", "name": "garmin", "instance": None},
+            "body_metrics": {"type": "sdk", "name": "body_metrics", "instance": None},
+        }
+        adapter = ClaudeSDKAdapter(mcp_servers=mock_servers)
 
         with patch("core.llm.query") as mock_query:
             mock_query.return_value = mock_async_gen([])
             await adapter._call_claude("system", "test")
             call_args = mock_query.call_args
             options = call_args.kwargs.get("options") or call_args[1].get("options")
-            assert options.mcp_servers == [mock_server]
+            assert isinstance(options.mcp_servers, dict), \
+                f"mcp_servers must be dict, got {type(options.mcp_servers)}"
+            assert "garmin" in options.mcp_servers
+            assert "body_metrics" in options.mcp_servers
+
+    @pytest.mark.asyncio
+    async def test_mcp_servers_rejects_list(self):
+        """mcp_servers에 리스트를 전달하면 TypeError가 발생해야 함."""
+        mock_server = {"type": "sdk", "name": "garmin", "instance": None}
+        with pytest.raises(TypeError, match="mcp_servers must be a dict"):
+            ClaudeSDKAdapter(mcp_servers=[mock_server])
 
     @pytest.mark.asyncio
     async def test_no_mcp_servers_by_default(self):
@@ -401,10 +415,13 @@ class TestMcpServersPassthrough:
 
     @pytest.mark.asyncio
     async def test_create_llm_adapter_with_mcp_servers(self):
-        mock_server = {"type": "sdk", "name": "garmin", "instance": None}
-        adapter = create_llm_adapter("claude", mcp_servers=[mock_server])
+        mock_servers = {
+            "garmin": {"type": "sdk", "name": "garmin", "instance": None},
+        }
+        adapter = create_llm_adapter("claude", mcp_servers=mock_servers)
         assert isinstance(adapter, ClaudeSDKAdapter)
-        assert adapter.mcp_servers == [mock_server]
+        assert isinstance(adapter.mcp_servers, dict)
+        assert "garmin" in adapter.mcp_servers
 
 
 # ── Task 12: Extended options (cwd, setting_sources, allowed_tools) ──

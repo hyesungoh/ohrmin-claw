@@ -31,11 +31,16 @@ class ClaudeSDKAdapter(LLMAdapter):
     def __init__(
         self,
         model: str = "claude-sonnet-4-20250514",
-        mcp_servers: list | None = None,
+        mcp_servers: dict | None = None,
         cwd: str | None = None,
     ):
+        if mcp_servers is not None and not isinstance(mcp_servers, dict):
+            raise TypeError(
+                f"mcp_servers must be a dict (e.g. {{'name': McpSdkServerConfig}}), "
+                f"got {type(mcp_servers).__name__}"
+            )
         self.model = model
-        self.mcp_servers = mcp_servers or []
+        self.mcp_servers = mcp_servers or {}
         self.cwd = cwd
 
     async def _call_claude(
@@ -58,6 +63,7 @@ class ClaudeSDKAdapter(LLMAdapter):
             options_kwargs["allowed_tools"] = [
                 "Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill",
             ]
+            options_kwargs["permission_mode"] = "bypassPermissions"
         async for msg in query(
             prompt=user_message,
             options=ClaudeAgentOptions(**options_kwargs),
