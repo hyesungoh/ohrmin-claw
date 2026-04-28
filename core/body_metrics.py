@@ -57,6 +57,51 @@ class BodyMetricsManager:
                 "source": source,
             })
 
+    def upsert_entry(
+        self,
+        date: str,
+        weight_kg: float | None = None,
+        body_fat_pct: float | None = None,
+        muscle_mass_kg: float | None = None,
+        bmi: float | None = None,
+        source: str = "manual",
+    ):
+        """(date, source) 조합이 같으면 덮어쓰기, 없으면 신규 추가."""
+        rows = self.read_all()
+        updated = False
+        for row in rows:
+            if row["date"] == date and row.get("source") == source:
+                if weight_kg is not None:
+                    row["weight_kg"] = weight_kg
+                if body_fat_pct is not None:
+                    row["body_fat_pct"] = body_fat_pct
+                if muscle_mass_kg is not None:
+                    row["muscle_mass_kg"] = muscle_mass_kg
+                if bmi is not None:
+                    row["bmi"] = bmi
+                updated = True
+                break
+        if updated:
+            self._write_all(rows)
+        else:
+            self.add_entry(date=date, weight_kg=weight_kg, body_fat_pct=body_fat_pct,
+                           muscle_mass_kg=muscle_mass_kg, bmi=bmi, source=source)
+
+    def _write_all(self, rows: list[dict]):
+        """전체 행을 CSV에 덮어쓰기."""
+        with open(self.csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self.HEADER)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({
+                    "date": row["date"],
+                    "weight_kg": "" if row.get("weight_kg") is None else row["weight_kg"],
+                    "body_fat_pct": "" if row.get("body_fat_pct") is None else row["body_fat_pct"],
+                    "muscle_mass_kg": "" if row.get("muscle_mass_kg") is None else row["muscle_mass_kg"],
+                    "bmi": "" if row.get("bmi") is None else row["bmi"],
+                    "source": row.get("source", "unknown"),
+                })
+
     def get_trend(self, field: str) -> dict:
         data = self.read_all()
         values = [row[field] for row in data if row.get(field)]

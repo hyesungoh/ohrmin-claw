@@ -30,6 +30,7 @@ core/           추상화 레이어 + 데이터 접근
   garmin_data.py   GarminConnectClient (python-garminconnect API 기반, 종목별 상세 조회)
   garmin_tools.py  Garmin MCP tool 정의 (@tool + create_sdk_mcp_server)
   body_metrics.py  Body Metrics CSV CRUD (data/inbody.csv, source 컬럼)
+  apple_health_reader.py iCloud JSON(Health Auto Export) → inbody.csv 자동 동기화
   body_metrics_parser.py 자연어 파싱 → 구조화 데이터 (정규식 기반)
   body_metrics_tools.py  Body Metrics MCP tool 정의
   preprocessor.py  원시 데이터 → 통계 요약 (평균, 트렌드, 이상치)
@@ -77,6 +78,8 @@ prompts/        시스템 프롬프트 (system.md) + 개인 목표 (goals.md) + 
 - `ALLOWED_USERS` — 응답 허용할 Discord User ID (쉼표 구분, 필수). 비워두면 모든 메시지 무시
 - `MEMORY_MODE` — `auto` (기본, 대화 후 자동 추출) | `manual` (명시적 요청 시만)
 - `SESSION_IDLE_TIMEOUT` — 세션 idle 타임아웃 분 (기본: `1440` = 24시간)
+- `NOTIFY_CHANNEL_ID` — 자동 분석 결과 전송 Discord 채널 ID (미설정 시 자동 분석 비활성화)
+- `APPLE_HEALTH_EXPORT_DIR` — iCloud Drive 내 Health Auto Export 폴더 경로 (기본값: `~/Library/Mobile Documents/iCloud~com~ifunography~HealthExport/Documents/daily inbody`)
 - Claude CLI 로그인 필요: `claude login`
 
 의존성:

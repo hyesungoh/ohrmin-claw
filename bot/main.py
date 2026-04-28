@@ -1,10 +1,12 @@
 """Health Manager Discord 봇 — 메인 엔트리포인트."""
+import asyncio
 import datetime
 import os
 import sys
 import tempfile
 
 import discord
+from discord.ext import tasks
 from dotenv import load_dotenv
 
 # 프로젝트 루트를 sys.path에 추가
@@ -22,6 +24,7 @@ from core.channel import DiscordChannel
 from core.memory import MemoryManager
 from core.context_compressor import ContextCompressor
 from core.session_manager import SessionManager
+from core.apple_health_reader import sync_from_icloud
 
 
 load_dotenv()
@@ -38,6 +41,11 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts")
 MEMORY_MODE = os.getenv("MEMORY_MODE", "auto")  # auto | manual
 SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "1440"))  # 분 (기본 24시간)
+NOTIFY_CHANNEL_ID = os.getenv("NOTIFY_CHANNEL_ID")  # 자동 분석 결과 전송 채널
+APPLE_HEALTH_EXPORT_DIR = os.getenv(
+    "APPLE_HEALTH_EXPORT_DIR",
+    os.path.expanduser("~/Library/Mobile Documents/iCloud~com~ifunography~HealthExport/Documents/daily inbody"),
+)
 
 
 def parse_allowed_users(raw: str) -> set[int]:
@@ -179,6 +187,11 @@ def _collect_health_context() -> dict:
     return context
 
 
+async def _collect_health_context_async() -> dict:
+    """Run the sync context collector in a thread to avoid blocking the asyncio event loop."""
+    return await asyncio.to_thread(_collect_health_context)
+
+
 async def build_history_from_thread(
     thread: discord.Thread,
     exclude_last: bool = False,
@@ -193,22 +206,23 @@ async def build_history_from_thread(
     return messages
 
 
-async def handle_health_query(message: discord.Message, content: str, image_paths: list[str] | None = None):
-    """스레드 기반 자연어 건강 질의 처리. TextBlock마다 즉시 전송."""
-    system_prompt = load_prompt("system.md")
-    goals = load_prompt("goals.md")
-
-    # 메모리를 시스템 프롬프트에 포함
-    parts = [system_prompt, goals]
+def _build_system_prompt() -> str:
+    """시스템 프롬프트 + 목표 + 메모리를 조립."""
+    parts = [load_prompt("system.md"), load_prompt("goals.md")]
     mem = memory_mgr.read_memory()
     usr = memory_mgr.read_user()
     if mem:
         parts.append(f"[기억]\n{mem}")
     if usr:
         parts.append(f"[사용자 프로필]\n{usr}")
-    full_system = "\n\n".join(p for p in parts if p)
+    return "\n\n".join(p for p in parts if p)
 
-    context = _collect_health_context()
+
+async def handle_health_query(message: discord.Message, content: str, image_paths: list[str] | None = None):
+    """스레드 기반 자연어 건강 질의 처리. TextBlock마다 즉시 전송."""
+    full_system = _build_system_prompt()
+
+    context = await _collect_health_context_async()
 
     is_thread = isinstance(message.channel, discord.Thread)
 
@@ -257,23 +271,14 @@ async def handle_health_query(message: discord.Message, content: str, image_path
 
 async def generate_weekly_report() -> str:
     """주간 리포트 생성."""
-    today = datetime.date.today()
-    week_ago = today - datetime.timedelta(days=7)
+    context = await _collect_health_context_async()
 
-    sleep_summary = {}
-    hr_summary = {}
-    hrv_summary = {}
-    activity_summary = {}
-    stress_summary = {}
-
-    if garmin:
-        sleep_summary = HealthPreprocessor.summarize_sleep(garmin.get_sleep(week_ago, today))
-        hr_summary = HealthPreprocessor.summarize_heart_rate(garmin.get_daily_summary(week_ago, today))
-        hrv_summary = HealthPreprocessor.summarize_hrv(garmin.get_hrv(week_ago, today))
-        activity_summary = HealthPreprocessor.summarize_activities(garmin.get_activities(week_ago, today))
-        stress_summary = HealthPreprocessor.summarize_stress(garmin.get_stress(week_ago, today))
-
-    body_metrics_data = body_metrics_mgr.read_latest()
+    sleep_summary = context.get("sleep", {})
+    hr_summary = context.get("heart_rate", {})
+    hrv_summary = context.get("hrv", {})
+    activity_summary = context.get("activities", {})
+    stress_summary = context.get("stress", {})
+    body_metrics_data = context.get("body_metrics")
 
     weekly = HealthPreprocessor.create_weekly_summary(
         sleep=sleep_summary or {"avg_total_hours": 0, "avg_score": 0, "trend": "no_data"},
@@ -301,9 +306,121 @@ async def generate_weekly_report() -> str:
 
 
 
+def _format_new_data_summary(rows: list[dict]) -> str:
+    """새 체성분 데이터를 한 줄 요약."""
+    parts = []
+    for row in rows:
+        items = [f"날짜: {row['date']}"]
+        if row.get("weight_kg") is not None:
+            items.append(f"체중: {row['weight_kg']}kg")
+        if row.get("body_fat_pct") is not None:
+            items.append(f"체지방률: {row['body_fat_pct']}%")
+        if row.get("muscle_mass_kg") is not None:
+            items.append(f"제지방량: {row['muscle_mass_kg']}kg")
+        if row.get("bmi") is not None:
+            items.append(f"BMI: {row['bmi']}")
+        parts.append(", ".join(items))
+    return "\n".join(parts)
+
+
+def _format_sleep_briefing(sleep_data: dict) -> str:
+    """수면 데이터를 간단히 브리핑."""
+    if not sleep_data:
+        return "데이터 없음"
+
+    avg_hours = sleep_data.get("avg_total_hours", 0)
+    min_hours = sleep_data.get("min_hours", 0)
+    max_hours = sleep_data.get("max_hours", 0)
+    trend = sleep_data.get("trend", "no_data")
+
+    if avg_hours == 0:
+        return "데이터 없음"
+
+    # 수면 품질 판정
+    if avg_hours >= 7:
+        quality = "양호"
+    elif avg_hours >= 6:
+        quality = "부족"
+    else:
+        quality = "매우 부족"
+
+    # 변동성 계산
+    if max_hours > 0 and min_hours > 0:
+        variation = max_hours - min_hours
+        variation_desc = f" (변동: {variation:.1f}시간)" if variation > 2 else ""
+    else:
+        variation_desc = ""
+
+    trend_emoji = "📈" if trend == "improving" else "📉" if trend == "declining" else "➡️"
+
+    return f"평균 {avg_hours:.1f}시간 ({quality}){variation_desc} {trend_emoji}"
+
+
+async def _run_auto_analysis(new_rows: list[dict]):
+    """새 체성분 데이터 감지 시 채널에 스레드 생성 + Claude 분석 전송."""
+    if not NOTIFY_CHANNEL_ID:
+        print("⚠️ NOTIFY_CHANNEL_ID 미설정 — 자동 분석 건너뜀")
+        return
+
+    try:
+        notify_channel = await channel._client.fetch_channel(int(NOTIFY_CHANNEL_ID))
+    except Exception as e:
+        print(f"⚠️ 알림 채널 조회 실패: {e}")
+        return
+
+    latest_date = new_rows[-1]["date"]
+    thread = await notify_channel.create_thread(
+        name=f"체성분 자동 분석 — {latest_date}",
+        type=discord.ChannelType.public_thread,
+    )
+    session_mgr.update_activity(thread.id)
+
+    summary = _format_new_data_summary(new_rows)
+    full_system = _build_system_prompt()
+    context = await _collect_health_context_async()
+
+    # 어젯밤 수면 브리핑 추가
+    sleep_briefing = _format_sleep_briefing(context.get("sleep", {}))
+
+    user_message = (
+        f"새로운 체성분 데이터가 Apple Health에서 자동 수집되었습니다.\n\n"
+        f"**📊 체성분 데이터:**\n{summary}\n\n"
+        f"**😴 어젯밤 수면:**\n{sleep_briefing}\n\n"
+        f"체성분 트렌드와 수면 효율을 종합적으로 분석해주세요."
+    )
+
+    async def on_text(text: str):
+        await send_reply(thread, text)
+
+    async with thread.typing():
+        await llm.ask_with_context(full_system, user_message, context, on_text=on_text)
+
+
+@tasks.loop(hours=1)
+async def health_sync_loop():
+    """매 1시간마다 iCloud에서 Apple Health 데이터 동기화."""
+    try:
+        new_rows = await asyncio.to_thread(sync_from_icloud, APPLE_HEALTH_EXPORT_DIR, body_metrics_mgr)
+        if new_rows:
+            print(f"📊 새 체성분 데이터 {len(new_rows)}건 동기화됨")
+            await _run_auto_analysis(new_rows)
+        else:
+            print("📊 새 체성분 데이터 없음")
+    except Exception as e:
+        print(f"⚠️ 자동 동기화 오류: {e}")
+
+
+@health_sync_loop.before_loop
+async def before_health_sync():
+    await channel._client.wait_until_ready()
+
+
 @channel._client.event
 async def on_ready():
     print(f"✅ {channel._client.user} 로그인 완료!")
+    if not health_sync_loop.is_running():
+        health_sync_loop.start()
+        print(f"📊 Apple Health 자동 동기화 시작 (1시간 주기, 경로: {APPLE_HEALTH_EXPORT_DIR})")
 
 
 @channel._client.event

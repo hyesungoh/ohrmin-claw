@@ -112,3 +112,43 @@ class TestBodyMetricsManager:
         mgr = BodyMetricsManager(csv_path)
         rows = mgr.read_all()
         assert rows[0]["source"] == "unknown"
+
+    def test_upsert_entry_insert_new(self, tmp_path):
+        """새 (date, source) 조합이면 추가."""
+        csv_path = str(tmp_path / "test.csv")
+        mgr = BodyMetricsManager(csv_path)
+        mgr.add_entry(date="2026-04-20", weight_kg=75.0, source="manual")
+        mgr.upsert_entry(date="2026-04-20", weight_kg=74.0, source="apple_health")
+        rows = mgr.read_all()
+        assert len(rows) == 2
+        assert rows[0]["source"] == "manual"
+        assert rows[1]["source"] == "apple_health"
+
+    def test_upsert_entry_update_existing(self, tmp_path):
+        """동일 (date, source) 조합이면 덮어쓰기."""
+        csv_path = str(tmp_path / "test.csv")
+        mgr = BodyMetricsManager(csv_path)
+        mgr.add_entry(date="2026-04-20", weight_kg=75.0, body_fat_pct=20.0, source="apple_health")
+        mgr.upsert_entry(date="2026-04-20", weight_kg=74.5, body_fat_pct=19.8, source="apple_health")
+        rows = mgr.read_all()
+        assert len(rows) == 1
+        assert rows[0]["weight_kg"] == 74.5
+        assert rows[0]["body_fat_pct"] == 19.8
+
+    def test_upsert_entry_creates_file(self, tmp_path):
+        """파일이 없으면 새로 생성."""
+        csv_path = str(tmp_path / "new.csv")
+        mgr = BodyMetricsManager(csv_path)
+        mgr.upsert_entry(date="2026-04-20", weight_kg=75.0, source="apple_health")
+        rows = mgr.read_all()
+        assert len(rows) == 1
+
+    def test_upsert_entry_preserves_other_rows(self, body_metrics_csv):
+        """다른 행은 건드리지 않음."""
+        mgr = BodyMetricsManager(body_metrics_csv)
+        mgr.upsert_entry(date="2026-04-01", weight_kg=71.0, source="apple_health")
+        rows = mgr.read_all()
+        # 기존 3행 + 새 apple_health 1행
+        assert len(rows) == 4
+        manual_rows = [r for r in rows if r["source"] == "manual"]
+        assert len(manual_rows) == 2

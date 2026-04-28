@@ -1,6 +1,8 @@
 """Garmin MCP tool 테스트."""
+import asyncio
 import datetime
 import json
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -185,3 +187,74 @@ class TestGetLastActivityTool:
         tool_fn = garmin_tools["get_last_activity"]
         await tool_fn.handler({"count": 50})
         mock_garmin_client.get_last_activity.assert_called_with(count=10)
+
+
+# ---------------------------------------------------------------------------
+# Regression test: @tool handlers must not block the event loop
+# ---------------------------------------------------------------------------
+
+TICKER_INTERVAL = 0.05   # seconds between ticker ticks
+SLOW_CALL_SLEEP = 0.3    # seconds the fake sync Garmin call blocks
+MIN_TICKS_REQUIRED = 4   # ticker must fire at least this many times
+
+
+@pytest.mark.asyncio
+class TestGetSleepToolDoesNotBlockEventLoop:
+    """Regression: get_sleep @tool handler must offload sync I/O to a thread.
+
+    If garmin_client.get_sleep is called directly on the event loop, a concurrent
+    ticker coroutine cannot run while the blocking call is executing. The handler
+    must wrap the call with await asyncio.to_thread(...) so the loop stays free.
+    """
+
+    @pytest.fixture
+    def slow_garmin_client(self):
+        """MagicMock whose get_sleep blocks for SLOW_CALL_SLEEP seconds."""
+        client = MagicMock()
+
+        def _blocking_sleep(*_args, **_kwargs):
+            time.sleep(SLOW_CALL_SLEEP)
+            return [{"day": "2026-04-20", "total_sleep": "08:00:00", "score": 82}]
+
+        client.get_sleep.side_effect = _blocking_sleep
+        return client
+
+    @pytest.fixture
+    def slow_garmin_tools(self, slow_garmin_client):
+        """TOOL_REGISTRY populated with the slow client."""
+        create_garmin_mcp_server(slow_garmin_client)
+        return TOOL_REGISTRY.copy()
+
+    async def test_event_loop_not_blocked_during_get_sleep(
+        self, slow_garmin_client, slow_garmin_tools
+    ):
+        """Ticker must fire >= MIN_TICKS_REQUIRED times while get_sleep handler runs."""
+        tick_count = 0
+
+        async def ticker():
+            nonlocal tick_count
+            while True:
+                await asyncio.sleep(TICKER_INTERVAL)
+                tick_count += 1
+
+        tool_fn = slow_garmin_tools["get_sleep"]
+
+        async def invoke_tool():
+            return await tool_fn.handler({"start": "2026-04-20", "end": "2026-04-20"})
+
+        ticker_task = asyncio.create_task(ticker())
+        try:
+            await asyncio.gather(invoke_tool(), return_exceptions=False)
+        finally:
+            ticker_task.cancel()
+            try:
+                await ticker_task
+            except asyncio.CancelledError:
+                pass
+
+        assert tick_count >= MIN_TICKS_REQUIRED, (
+            f"Event loop was blocked: ticker fired only {tick_count} times "
+            f"(need >= {MIN_TICKS_REQUIRED}). "
+            f"get_sleep handler calls garmin_client.get_sleep() synchronously, "
+            f"blocking the asyncio event loop. Wrap with await asyncio.to_thread(...)."
+        )
