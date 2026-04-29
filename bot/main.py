@@ -396,9 +396,9 @@ async def _run_auto_analysis(new_rows: list[dict]):
         await llm.ask_with_context(full_system, user_message, context, on_text=on_text)
 
 
-@tasks.loop(hours=1)
+@tasks.loop(minutes=2)
 async def health_sync_loop():
-    """매 1시간마다 iCloud에서 Apple Health 데이터 동기화."""
+    """매 2분마다 iCloud에서 Apple Health 데이터 동기화."""
     try:
         new_rows = await asyncio.to_thread(sync_from_icloud, APPLE_HEALTH_EXPORT_DIR, body_metrics_mgr)
         if new_rows:
@@ -420,7 +420,7 @@ async def on_ready():
     print(f"✅ {channel._client.user} 로그인 완료!")
     if not health_sync_loop.is_running():
         health_sync_loop.start()
-        print(f"📊 Apple Health 자동 동기화 시작 (1시간 주기, 경로: {APPLE_HEALTH_EXPORT_DIR})")
+        print(f"📊 Apple Health 자동 동기화 시작 (2분 주기, 경로: {APPLE_HEALTH_EXPORT_DIR})")
 
 
 @channel._client.event
