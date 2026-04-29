@@ -124,6 +124,32 @@ class TestCollectHealthContextAsyncDoesNotBlockLoop:
 
 
 @pytest.mark.asyncio
+class TestCollectHealthContextSleepStructure:
+    """sleep 키가 {baseline_7d, last_night} 2단 구조로 반환되어야 한다."""
+
+    async def test_sleep_is_two_tier(self, monkeypatch):
+        import bot.main as main_mod
+
+        client = MagicMock()
+        client.get_sleep.return_value = []
+        client.get_daily_summary.return_value = []
+        client.get_hrv.return_value = []
+        client.get_activities.return_value = []
+        client.get_stress.return_value = []
+        monkeypatch.setattr(main_mod, "garmin", client)
+
+        mock_body_mgr = MagicMock()
+        mock_body_mgr.read_latest.return_value = None
+        monkeypatch.setattr(main_mod, "body_metrics_mgr", mock_body_mgr)
+
+        context = await main_mod._collect_health_context_async()
+
+        assert "sleep" in context
+        assert "baseline_7d" in context["sleep"]
+        assert "last_night" in context["sleep"]
+
+
+@pytest.mark.asyncio
 class TestGenerateWeeklyReportDoesNotBlockLoop:
     """generate_weekly_report() must not block the event loop with sync Garmin I/O."""
 

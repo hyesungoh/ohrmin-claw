@@ -22,6 +22,12 @@ def mock_garmin():
 class TestGetSleep:
     def test_returns_mapped_fields(self, mock_garmin):
         client, api = mock_garmin
+        # Garmin's *Local timestamps are GMT-formatted but represent local wall clock,
+        # so reading them as UTC yields the local HH:MM directly.
+        # 1579129200000 ms = 2020-01-15 23:00:00 UTC → bedtime "23:00"
+        # 1579158000000 ms = 2020-01-16 07:00:00 UTC → wake_time "07:00" (8h later)
+        bedtime_ms = 1579129200000
+        wake_ms = 1579158000000
         api.get_sleep_data.return_value = {
             "dailySleepDTO": {
                 "calendarDate": "2026-04-20",
@@ -32,8 +38,15 @@ class TestGetSleep:
                 "awakeSleepSeconds": 3600,  # 1h
                 "averageSpO2Value": 95.0,
                 "averageRespirationValue": 15.0,
+                "sleepStartTimestampLocal": bedtime_ms,
+                "sleepEndTimestampLocal": wake_ms,
+                "awakeCount": 4,
             },
-            "sleepScores": {"overall": {"value": 82}},
+            "sleepScores": {
+                "overall": {"value": 82},
+                "deepPercentage": {"qualifierKey": "GOOD", "value": 19},
+            },
+            "sleepScoreInsight": "POSITIVE_DURATION",
         }
 
         data = client.get_sleep(
@@ -50,6 +63,61 @@ class TestGetSleep:
         assert row["rem_sleep"] == "02:00:00"
         assert row["awake"] == "01:00:00"
         assert row["score"] == 82
+        # New raw fields for last_night derived calculations
+        assert row["total_seconds"] == 28800
+        assert row["awake_seconds"] == 3600
+        assert row["deep_pct"] == 19
+        assert row["awake_count"] == 4
+        assert row["sleep_insight"] == "POSITIVE_DURATION"
+        # bedtime/wake_time as "HH:MM" strings derived from local timestamp
+        assert row["bedtime"] == "23:00"
+        assert row["wake_time"] == "07:00"
+
+    def test_handles_missing_optional_fields(self, mock_garmin):
+        """누락된 신규 필드는 None으로 채워져야 한다."""
+        client, api = mock_garmin
+        api.get_sleep_data.return_value = {
+            "dailySleepDTO": {
+                "calendarDate": "2026-04-20",
+                "sleepTimeSeconds": 25200,
+                "deepSleepSeconds": 3600,
+                "lightSleepSeconds": 10800,
+                "remSleepSeconds": 7200,
+                "awakeSleepSeconds": 3600,
+            },
+            "sleepScores": {"overall": {"value": 75}},
+        }
+        data = client.get_sleep(
+            datetime.date(2026, 4, 20), datetime.date(2026, 4, 20)
+        )
+        row = data[0]
+        assert row["bedtime"] is None
+        assert row["wake_time"] is None
+        assert row["deep_pct"] is None
+        assert row["awake_count"] is None
+        assert row["sleep_insight"] is None
+        assert row["total_seconds"] == 25200
+        assert row["awake_seconds"] == 3600
+
+    def test_deep_pct_accepts_plain_number(self, mock_garmin):
+        """sleepScores.deepPercentage가 dict가 아닌 숫자로 와도 허용."""
+        client, api = mock_garmin
+        api.get_sleep_data.return_value = {
+            "dailySleepDTO": {
+                "calendarDate": "2026-04-20",
+                "sleepTimeSeconds": 25200,
+                "deepSleepSeconds": 3600,
+                "awakeSleepSeconds": 1800,
+            },
+            "sleepScores": {
+                "overall": {"value": 75},
+                "deepPercentage": 22,
+            },
+        }
+        data = client.get_sleep(
+            datetime.date(2026, 4, 20), datetime.date(2026, 4, 20)
+        )
+        assert data[0]["deep_pct"] == 22
 
     def test_empty_response(self, mock_garmin):
         client, api = mock_garmin

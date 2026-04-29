@@ -8,7 +8,25 @@ from core.report import ReportGenerator
 def weekly_summary():
     return {
         "period": "2026-04-14 ~ 2026-04-20",
-        "sleep": {"avg_total_hours": 7.2, "avg_score": 80, "trend": "stable"},
+        "sleep": {
+            "baseline_7d": {
+                "avg_total_hours": 7.2,
+                "avg_score": 80,
+                "avg_bedtime": "23:45",
+                "trend": "stable",
+            },
+            "last_night": {
+                "hours": 6.4,
+                "score": 75,
+                "efficiency_pct": 87.0,
+                "deep_pct_delta": -3.0,
+                "hrv_z": -1.1,
+                "avg_rr": 14.2,
+                "awake_count": 3,
+                "bedtime": "00:12",
+                "sleep_insight": "NEGATIVE_LATE_BED_TIME",
+            },
+        },
         "heart_rate": {"avg_rhr": 57, "trend": "improving"},
         "activities": {
             "total_count": 4,

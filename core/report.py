@@ -7,6 +7,7 @@ class ReportGenerator:
     @staticmethod
     def weekly_report(summary: dict) -> str:
         s = summary
+        sleep = s['sleep']['baseline_7d']
         lines = [
             f"# 📊 주간 건강 리포트",
             f"**기간**: {s['period']}",
@@ -16,9 +17,9 @@ class ReportGenerator:
             "## 😴 수면",
             f"| 항목 | 값 |",
             f"|------|-----|",
-            f"| 평균 수면 시간 | **{s['sleep']['avg_total_hours']}시간** |",
-            f"| 평균 수면 점수 | **{s['sleep']['avg_score']}점** |",
-            f"| 추세 | {_trend_emoji(s['sleep']['trend'])} {s['sleep']['trend']} |",
+            f"| 평균 수면 시간 | **{sleep['avg_total_hours']}시간** |",
+            f"| 평균 수면 점수 | **{sleep['avg_score']}점** |",
+            f"| 추세 | {_trend_emoji(sleep['trend'])} {sleep['trend']} |",
             "",
             "## ❤️ 심박수",
             f"| 항목 | 값 |",
@@ -77,6 +78,7 @@ class ReportGenerator:
     @staticmethod
     def monthly_report(summary: dict) -> str:
         s = summary
+        sleep = s['sleep']['baseline_7d']
         lines = [
             f"# 📈 월간 건강 리포트",
             f"**기간**: {s['period']}",
@@ -85,7 +87,7 @@ class ReportGenerator:
             "",
             "## 📊 종합 요약",
             "",
-            f"- 평균 수면: **{s['sleep']['avg_total_hours']}시간** ({s['sleep']['trend']})",
+            f"- 평균 수면: **{sleep['avg_total_hours']}시간** ({sleep['trend']})",
             f"- 평균 안정시 심박수: **{s['heart_rate']['avg_rhr']} bpm** ({s['heart_rate']['trend']})",
             f"- 운동 횟수: **{s['activities']['total_count']}회**",
             f"- HRV 평균: **{s['hrv']['avg_weekly']} ms** ({s['hrv']['trend']})",

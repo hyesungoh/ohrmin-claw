@@ -24,6 +24,30 @@ def _seconds_to_hms(seconds: int | float | None) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _ms_to_local_hhmm(ms: int | float | None) -> str | None:
+    """Garmin *Local timestamp(ms)을 'HH:MM' 문자열로 변환.
+
+    Garmin의 Local timestamp는 epoch ms이지만 timezone offset이 이미 더해져 있어
+    UTC로 읽으면 사용자의 wall-clock time이 그대로 나온다.
+    """
+    if ms is None:
+        return None
+    try:
+        dt = datetime.datetime.fromtimestamp(int(ms) / 1000, tz=datetime.timezone.utc)
+        return dt.strftime("%H:%M")
+    except (ValueError, TypeError, OSError):
+        return None
+
+
+def _extract_pct(field) -> float | int | None:
+    """sleepScores의 percentage 필드 — dict({qualifierKey, value}) 또는 숫자 모두 허용."""
+    if field is None:
+        return None
+    if isinstance(field, dict):
+        return field.get("value")
+    return field
+
+
 def _date_range(start: datetime.date, end: datetime.date):
     """start부터 end까지의 날짜를 순회."""
     current = start
@@ -64,6 +88,14 @@ class GarminConnectClient:
                 "avg_spo2": dto.get("averageSpO2Value"),
                 "avg_rr": dto.get("averageRespirationValue"),
                 "score": overall.get("value", 0),
+                # 어젯밤 derived 필드 계산용 raw + Garmin 자체 산출값
+                "total_seconds": dto.get("sleepTimeSeconds"),
+                "awake_seconds": dto.get("awakeSleepSeconds"),
+                "bedtime": _ms_to_local_hhmm(dto.get("sleepStartTimestampLocal")),
+                "wake_time": _ms_to_local_hhmm(dto.get("sleepEndTimestampLocal")),
+                "deep_pct": _extract_pct(scores.get("deepPercentage")),
+                "awake_count": dto.get("awakeCount"),
+                "sleep_insight": raw.get("sleepScoreInsight"),
             })
         return results
 

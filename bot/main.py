@@ -174,7 +174,11 @@ def _collect_health_context() -> dict:
         activities = garmin.get_activities(week_ago, today)
         stress = garmin.get_stress(week_ago, today)
 
-        context["sleep"] = HealthPreprocessor.summarize_sleep(sleep)
+        baseline_7d = HealthPreprocessor.summarize_sleep(sleep)
+        last_night = HealthPreprocessor.summarize_last_night_sleep(
+            sleep, hrv, today.isoformat()
+        )
+        context["sleep"] = {"baseline_7d": baseline_7d, "last_night": last_night}
         context["heart_rate"] = HealthPreprocessor.summarize_heart_rate(daily)
         context["hrv"] = HealthPreprocessor.summarize_hrv(hrv)
         context["activities"] = HealthPreprocessor.summarize_activities(activities)
@@ -280,8 +284,12 @@ async def generate_weekly_report() -> str:
     stress_summary = context.get("stress", {})
     body_metrics_data = context.get("body_metrics")
 
+    fallback_sleep = {
+        "baseline_7d": HealthPreprocessor.summarize_sleep([]),
+        "last_night": None,
+    }
     weekly = HealthPreprocessor.create_weekly_summary(
-        sleep=sleep_summary or {"avg_total_hours": 0, "avg_score": 0, "trend": "no_data"},
+        sleep=sleep_summary or fallback_sleep,
         heart_rate=hr_summary or {"avg_rhr": 0, "trend": "no_data"},
         activities=activity_summary or {"total_count": 0, "total_calories": 0, "total_distance": 0, "total_time_hours": 0, "by_sport": {}},
         hrv=hrv_summary or {"avg_weekly": 0, "trend": "no_data", "status_distribution": {}},
@@ -324,36 +332,42 @@ def _format_new_data_summary(rows: list[dict]) -> str:
 
 
 def _format_sleep_briefing(sleep_data: dict) -> str:
-    """수면 데이터를 간단히 브리핑."""
+    """어젯밤 수면을 간단히 브리핑. baseline_7d 평균은 보조로만 표시."""
     if not sleep_data:
         return "데이터 없음"
 
-    avg_hours = sleep_data.get("avg_total_hours", 0)
-    min_hours = sleep_data.get("min_hours", 0)
-    max_hours = sleep_data.get("max_hours", 0)
-    trend = sleep_data.get("trend", "no_data")
+    last_night = sleep_data.get("last_night")
+    baseline = sleep_data.get("baseline_7d") or {}
 
-    if avg_hours == 0:
+    if not last_night:
+        avg_hours = baseline.get("avg_total_hours", 0) or 0
+        if avg_hours == 0:
+            return "데이터 없음"
+        return f"어젯밤 데이터 없음 (7일 평균 {avg_hours:.1f}시간)"
+
+    hours = last_night.get("hours")
+    if hours is None:
         return "데이터 없음"
 
-    # 수면 품질 판정
-    if avg_hours >= 7:
+    if hours >= 7:
         quality = "양호"
-    elif avg_hours >= 6:
+    elif hours >= 6:
         quality = "부족"
     else:
         quality = "매우 부족"
 
-    # 변동성 계산
-    if max_hours > 0 and min_hours > 0:
-        variation = max_hours - min_hours
-        variation_desc = f" (변동: {variation:.1f}시간)" if variation > 2 else ""
-    else:
-        variation_desc = ""
+    parts = [f"{hours:.1f}시간 ({quality})"]
+    score = last_night.get("score")
+    if score:
+        parts.append(f"점수 {score}")
+    efficiency = last_night.get("efficiency_pct")
+    if efficiency is not None:
+        parts.append(f"효율 {efficiency:.0f}%")
+    bedtime = last_night.get("bedtime")
+    if bedtime:
+        parts.append(f"취침 {bedtime}")
 
-    trend_emoji = "📈" if trend == "improving" else "📉" if trend == "declining" else "➡️"
-
-    return f"평균 {avg_hours:.1f}시간 ({quality}){variation_desc} {trend_emoji}"
+    return ", ".join(parts)
 
 
 async def _run_auto_analysis(new_rows: list[dict]):
