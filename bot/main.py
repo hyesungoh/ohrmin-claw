@@ -404,8 +404,6 @@ async def health_sync_loop():
         if new_rows:
             print(f"📊 새 체성분 데이터 {len(new_rows)}건 동기화됨")
             await _run_auto_analysis(new_rows)
-        else:
-            print("📊 새 체성분 데이터 없음")
     except Exception as e:
         print(f"⚠️ 자동 동기화 오류: {e}")
 
