@@ -41,7 +41,7 @@ Claude가 Garmin 데이터를 종목별로 자동 감지하여 상세 분석합�
 
 ### 자동화
 
-- **Apple Health 자동 동기화** — 1시간 주기로 iCloud에서 체성분 데이터를 수집하고, 새 데이터 감지 시 Discord에 분석 결과를 자동 전송합니다
+- **Apple Health 자동 동기화** — 2분 주기로 iCloud에서 체성분 데이터를 수집하고, 새 데이터 감지 시 Discord에 분석 결과를 자동 전송합니다
 - **주간 리포트** — 수면/심박/HRV/활동/스트레스/체성분 7일 요약 + AI 인사이트
 
 ---
@@ -51,7 +51,7 @@ Claude가 Garmin 데이터를 종목별로 자동 감지하여 상세 분석합�
 | 소스 | 연동 방식 | 수집 항목 |
 |------|----------|----------|
 | **Garmin Connect** | python-garminconnect API 직접 호출 | 수면, 심박수, HRV, 스트레스, 활동/운동 상세 |
-| **Apple Health** | Health Auto Export 앱 → iCloud → 1시간 폴링 | 체중, 체지방률, 제지방량, BMI |
+| **Apple Health** | Health Auto Export 앱 → iCloud → 2분 폴링 | 체중, 체지방률, 제지방량, BMI |
 | **수동 입력** | Discord 채팅으로 자연어 입력 | 체성분 수치 (인바디 등) |
 | **이미지** | Discord 첨부파일 (최대 5개, 10MB) | 인바디 결과지, 식단 사진 등 |
 
@@ -129,7 +129,7 @@ python3 bot/main.py
 ✅ Garmin MCP 도구 등록 완료
 🔒 허용된 유저: 1명
 🚀 Health Manager 봇 시작...
-📊 Apple Health 자동 동기화 시작 (1시간 주기)
+📊 Apple Health 자동 동기화 시작 (2분 주기)
 ```
 
 Garmin 로그인이 실패해도 봇은 정상 실행됩니다 (체성분 기능만 동작).
@@ -163,7 +163,7 @@ Garmin 로그인이 실패해도 봇은 정상 실행됩니다 (체성분 기능
 
 ### Apple Health 자동 동기화
 
-iPhone에 **Health Auto Export** 앱을 설치하고 iCloud Drive로 자동 내보내기를 설정하면, 봇이 1시간마다 새 데이터를 감지하여 자동 분석합니다. `NOTIFY_CHANNEL_ID`를 설정해야 알림이 전송됩니다.
+iPhone에 **Health Auto Export** 앱을 설치하고 iCloud Drive로 자동 내보내기를 설정하면, 봇이 2분마다 새 데이터를 감지하여 자동 분석합니다. `NOTIFY_CHANNEL_ID`를 설정해야 알림이 전송됩니다.
 
 ---
 
@@ -177,7 +177,7 @@ iPhone에 **Health Auto Export** 앱을 설치하고 iCloud Drive로 자동 내�
 0 3 * * 0 /path/to/health-manager/scripts/backup.sh
 ```
 
-Apple Health 동기화와 자동 분석은 봇 프로세스 내부에서 1시간 주기로 실행됩니다.
+Apple Health 동기화와 자동 분석은 봇 프로세스 내부에서 2분 주기로 실행됩니다.
 
 ---
 
