@@ -2,8 +2,6 @@
 
 **한국어** | [English](./README.en.md)
 
-> 이름 유래: '오예성' + Claude의 'Claw' 매시업
-
 Garmin 워치 + Apple Health + 인바디 데이터를 통합하여 Discord에서 자연어로 건강을 관리하는 AI 비서입니다.
 Claude AI가 운동생리학, 수면의학, 체성분 분석 프레임워크를 적용하여 과학적 근거 기반의 인사이트를 제공합니다.
 

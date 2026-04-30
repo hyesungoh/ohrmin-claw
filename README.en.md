@@ -2,8 +2,6 @@
 
 [한국어](./README.md) | **English**
 
-> Name: a mashup of "Oh Yeseong" + Claude's "Claw"
-
 An AI health assistant that unifies Garmin watch, Apple Health, and body-composition data so you can manage your health through natural-language chat on Discord.
 Claude AI applies sports physiology, sleep medicine, and body-composition analysis frameworks to deliver science-backed insights.
 
