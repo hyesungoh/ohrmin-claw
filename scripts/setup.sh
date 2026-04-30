@@ -6,7 +6,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-echo "🚀 Health Manager 초기 설정 시작"
+echo "🚀 ohrmin-claw 초기 설정 시작"
 
 # 1. Python 의존성 설치
 echo "📦 Python 패키지 설치 중..."

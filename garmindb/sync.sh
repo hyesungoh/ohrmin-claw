@@ -2,7 +2,7 @@
 # Garmin Connect 토큰 검증/갱신 스크립트
 # 봇은 python-garminconnect로 직접 API를 호출하므로 DB 동기화 불필요.
 # 이 스크립트는 토큰이 유효한지 확인하고, 만료 시 갱신한다.
-# cron: 0 6 * * * /path/to/health-manager/garmindb/sync.sh
+# cron: 0 6 * * * /path/to/ohrmin-claw/garmindb/sync.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"

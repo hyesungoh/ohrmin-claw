@@ -6,3 +6,6 @@ __pycache__/
 .pytest_cache/
 prompts/memory.md
 prompts/user.md
+data/
+backups/
+.claude/*.lock

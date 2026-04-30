@@ -1,14 +1,14 @@
-# iOS 단축어로 Apple Health → Health Manager 연동 가이드
+# iOS 단축어로 Apple Health → ohrmin-claw 연동 가이드
 
 ## 개요
 
-iOS 단축어(Shortcuts)를 사용하여 Apple Health 데이터를 health-manager로 자동 전송하는 방법.
+iOS 단축어(Shortcuts)를 사용하여 Apple Health 데이터를 ohrmin-claw로 자동 전송하는 방법.
 
 > **전제 조건**
 > - iPhone (iOS 16+)
 > - 단축어 앱 (기본 설치됨)
 > - Apple Health에 InBody 등 체성분 데이터가 동기화되어 있을 것
-> - health-manager에 HTTP 수신 엔드포인트가 구현되어 있을 것 (아래 서버 설정 참고)
+> - ohrmin-claw에 HTTP 수신 엔드포인트가 구현되어 있을 것 (아래 서버 설정 참고)
 
 ---
 
@@ -18,7 +18,7 @@ iOS 단축어(Shortcuts)를 사용하여 Apple Health 데이터를 health-manage
 
 1. iPhone에서 **단축어** 앱 열기
 2. 우측 상단 **+** 탭
-3. 이름: `Health Manager 내보내기`
+3. 이름: `ohrmin-claw 내보내기` _(스크린샷 갱신 필요)_
 
 ### Step 2: 날짜 변수 설정
 
@@ -132,7 +132,7 @@ iOS 단축어(Shortcuts)를 사용하여 Apple Health 데이터를 health-manage
 | **Wi-Fi 연결** (집 Wi-Fi) | ★★☆ | 귀가 시 자동 실행 |
 | **충전 시작** | ★★☆ | 매일 충전 습관 있으면 유용 |
 
-4. "실행할 단축어" → `Health Manager 내보내기` 선택
+4. "실행할 단축어" → `ohrmin-claw 내보내기` 선택
 5. **"실행 전 묻기" 끄기** (완전 자동화)
 
 ### 주의사항
@@ -143,11 +143,11 @@ iOS 단축어(Shortcuts)를 사용하여 Apple Health 데이터를 health-manage
 
 ---
 
-## 3. 서버 설정 (health-manager 측)
+## 3. 서버 설정 (ohrmin-claw 측)
 
 ### 구현 필요: HTTP 엔드포인트
 
-현재 health-manager에는 HTTP 서버가 없습니다. 아래를 구현해야 합니다.
+현재 ohrmin-claw에는 HTTP 서버가 없습니다. 아래를 구현해야 합니다.
 
 #### 필요한 작업
 

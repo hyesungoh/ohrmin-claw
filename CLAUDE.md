@@ -1,4 +1,4 @@
-# Health Manager
+# ohrmin-claw
 
 Garmin + 체성분 데이터 기반 개인 AI 건강 비서 Discord 봇.
 

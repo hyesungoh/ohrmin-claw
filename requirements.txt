@@ -1,20 +1,21 @@
-# Health Manager Dependencies
+# ohrmin-claw Dependencies
 
 # Garmin data
-garmindb
+garmindb==3.7.0
+garminconnect==0.3.2
 
 # Discord bot
-discord.py
+discord.py==2.7.1
 
 # Data processing
-pandas
+pandas~=3.0.2
 
 # LLM
-claude-agent-sdk
+claude-agent-sdk==0.1.66
 
 # Environment
-python-dotenv
+python-dotenv~=1.2.2
 
 # Testing
-pytest
-pytest-asyncio
+pytest~=9.0.3
+pytest-asyncio~=1.3.0

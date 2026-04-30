@@ -1,6 +1,6 @@
 #!/bin/bash
 # DB → SQL 덤프 백업 스크립트
-# cron: 0 3 * * 0 /path/to/health-manager/scripts/backup.sh
+# cron: 0 3 * * 0 /path/to/ohrmin-claw/scripts/backup.sh
 
 set -e
 

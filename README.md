@@ -1,4 +1,8 @@
-# Health Manager — 개인 AI 건강 비서
+# ohrmin-claw — 개인 AI 건강 비서
+
+**한국어** | [English](./README.en.md)
+
+> 이름 유래: '오예성' + Claude의 'Claw' 매시업
 
 Garmin 워치 + Apple Health + 인바디 데이터를 통합하여 Discord에서 자연어로 건강을 관리하는 AI 비서입니다.
 Claude AI가 운동생리학, 수면의학, 체성분 분석 프레임워크를 적용하여 과학적 근거 기반의 인사이트를 제공합니다.
@@ -7,7 +11,7 @@ Claude AI가 운동생리학, 수면의학, 체성분 분석 프레임워크를 
 
 ## 무엇이 다른가요?
 
-일반 건강 대시보드는 수치를 보여줍니다. Health Manager는 **해석**합니다.
+일반 건강 대시보드는 수치를 보여줍니다. ohrmin-claw는 **해석**합니다.
 
 - **자연어로 질문** — "이번 주 수면 어때?", "최근 운동 분석해줘"처럼 채팅하면 AI가 답합니다
 - **대화가 이어집니다** — Discord 스레드 안에서 후속 질문이 가능하고, 이전 맥락을 기억합니다
@@ -43,6 +47,13 @@ Claude가 Garmin 데이터를 종목별로 자동 감지하여 상세 분석합�
 
 - **Apple Health 자동 동기화** — 2분 주기로 iCloud에서 체성분 데이터를 수집하고, 새 데이터 감지 시 Discord에 분석 결과를 자동 전송합니다
 - **주간 리포트** — 수면/심박/HRV/활동/스트레스/체성분 7일 요약 + AI 인사이트
+
+---
+
+## 스크린샷
+
+<!-- TODO: Discord 봇 동작 GIF/스크린샷 추가 -->
+_준비 중. 스레드 기반 대화, 자동 분석 알림 캡처 예정._
 
 ---
 
@@ -82,7 +93,7 @@ Claude가 Garmin 데이터를 종목별로 자동 감지하여 상세 분석합�
 
 ```bash
 git clone <repository-url>
-cd health-manager
+cd ohrmin-claw
 ```
 
 ### 2. 초기 세팅
@@ -128,7 +139,7 @@ python3 bot/main.py
 ✅ Garmin Connect 로그인 성공
 ✅ Garmin MCP 도구 등록 완료
 🔒 허용된 유저: 1명
-🚀 Health Manager 봇 시작...
+🚀 ohrmin-claw 봇 시작...
 📊 Apple Health 자동 동기화 시작 (2분 주기)
 ```
 
@@ -171,10 +182,10 @@ iPhone에 **Health Auto Export** 앱을 설치하고 iCloud Drive로 자동 내�
 
 ```cron
 # 매일 06:00 — Garmin 토큰 검증/갱신
-0 6 * * * /path/to/health-manager/garmindb/sync.sh
+0 6 * * * /path/to/ohrmin-claw/garmindb/sync.sh
 
 # 매주 일요일 03:00 — 데이터 백업
-0 3 * * 0 /path/to/health-manager/scripts/backup.sh
+0 3 * * 0 /path/to/ohrmin-claw/scripts/backup.sh
 ```
 
 Apple Health 동기화와 자동 분석은 봇 프로세스 내부에서 2분 주기로 실행됩니다.
@@ -230,7 +241,7 @@ Apple Health 동기화와 자동 분석은 봇 프로세스 내부에서 2분 �
 ## 디렉토리 구조
 
 ```
-health-manager/
+ohrmin-claw/
 ├── bot/
 │   └── main.py                 # 봇 엔트리포인트
 ├── core/

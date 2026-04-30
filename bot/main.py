@@ -1,4 +1,4 @@
-"""Health Manager Discord 봇 — 메인 엔트리포인트."""
+"""ohrmin-claw Discord 봇 — 메인 엔트리포인트."""
 import asyncio
 import datetime
 import os
@@ -475,7 +475,7 @@ def main():
     if not DISCORD_TOKEN:
         print("❌ DISCORD_BOT_TOKEN이 설정되지 않았습니다. .env 파일을 확인하세요.")
         sys.exit(1)
-    print("🚀 Health Manager 봇 시작...")
+    print("🚀 ohrmin-claw 봇 시작...")
     if ALLOWED_USERS:
         print(f"🔒 허용된 유저: {len(ALLOWED_USERS)}명")
     else:
