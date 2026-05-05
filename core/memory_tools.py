@@ -35,15 +35,26 @@ def create_memory_mcp_server(memory_manager):
         "content": Annotated[str, "저장할 내용"],
     }
 
-    @tool("add_memory", "메모리 엔트리 추가", ADD_SCHEMA)
+    @tool("add_memory", "메모리 엔트리 추가 (용량 초과 시 LLM이 자동 통합)", ADD_SCHEMA)
     async def add_memory(args):
         target = args.get("target", "memory")
         content = args.get("content", "")
-        if target == "memory":
-            result = memory_manager.append_memory(content)
-        else:
-            result = memory_manager.append_user(content)
-        return _json_response(result)
+        # 용량 여유가 있으면 빠른 append 경로 (LLM 호출 없음)
+        append_result = (
+            memory_manager.append_memory(content) if target == "memory"
+            else memory_manager.append_user(content)
+        )
+        if append_result["success"]:
+            return _json_response(append_result)
+        if "entries" not in append_result:
+            # 인젝션 거부 등 통합 불필요
+            return _json_response(append_result)
+        # 용량 초과 — llm이 주입되어 있으면 통합 시도
+        llm = getattr(memory_manager, "llm", None)
+        if llm is None:
+            return _json_response(append_result)
+        consolidated = await memory_manager._save_or_consolidate(llm, target, content)
+        return _json_response(consolidated)
 
     REPLACE_SCHEMA = {
         "target": Annotated[str, "수정할 메모리 대상 ('memory' 또는 'user')"],

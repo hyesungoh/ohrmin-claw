@@ -81,6 +81,9 @@ class MemoryManager:
         self.prompts_dir = prompts_dir
         self._memory_path = os.path.join(prompts_dir, "memory.md")
         self._user_path = os.path.join(prompts_dir, "user.md")
+        # LLM 어댑터는 부팅 순서상 사후 주입(lazy binding). add_memory MCP 툴이
+        # 용량 초과 시 이 슬롯을 통해 통합기를 호출함. None이면 통합 없이 실패 반환.
+        self.llm = None
 
     def _path_for(self, target: str) -> str:
         if target == "memory":
@@ -182,7 +185,8 @@ class MemoryManager:
         new_content = f"{current}{ENTRY_DELIMITER}{entry}" if current.strip() else entry
         limit = self._limit_for(target)
         if len(new_content) > limit:
-            logger.warning("용량 초과, 항목 무시: %s", entry[:50])
+            # warning은 통합 시도까지 끝난 최종 실패 분기에서만 찍는다.
+            # _append는 _save_or_consolidate에서도 호출되므로 여기서 미리 찍으면 오해 발생.
             entries = self.list_entries(target)
             return {
                 "success": False,
@@ -221,13 +225,14 @@ class MemoryManager:
                 if entry:
                     await self._save_or_consolidate(llm, "user", entry)
 
-    async def _save_or_consolidate(self, llm, target: str, entry: str) -> None:
-        """추가 시도 → 실패 시 LLM으로 통합."""
+    async def _save_or_consolidate(self, llm, target: str, entry: str) -> dict:
+        """추가 시도 → 실패 시 LLM으로 통합. 결과를 dict로 리턴."""
         result = self._append(target, entry)
         if result["success"]:
-            return
+            return {"success": True, "consolidated": False}
         if "entries" not in result:
-            return  # 인젝션 거부 등 통합 불필요
+            # 인젝션 거부 등 통합 불필요
+            return {"success": False, "error": result.get("error", "거부됨")}
         # 용량 초과 → LLM에게 통합 요청
         entries = result["entries"]
         limit = result["limit"]
@@ -243,10 +248,13 @@ class MemoryManager:
             consolidated = await llm.ask("메모리 통합기", consolidation_prompt)
         except Exception:
             logger.warning("메모리 통합 실패, 항목 무시: %s", entry[:50])
-            return
-        if consolidated and consolidated.strip():
-            cleaned = consolidated.strip()[:limit]
-            if _INJECTION_PATTERNS.search(cleaned):
-                logger.warning("통합 결과에 인젝션 패턴 감지, 무시")
-                return
-            self._write_raw(target, cleaned)
+            return {"success": False, "error": "LLM 통합 실패"}
+        if not consolidated or not consolidated.strip():
+            logger.warning("메모리 통합 빈 응답, 항목 무시: %s", entry[:50])
+            return {"success": False, "error": "통합 빈 응답"}
+        cleaned = consolidated.strip()[:limit]
+        if _INJECTION_PATTERNS.search(cleaned):
+            logger.warning("통합 결과에 인젝션 패턴 감지, 무시")
+            return {"success": False, "error": "통합 결과 인젝션 감지"}
+        self._write_raw(target, cleaned)
+        return {"success": True, "consolidated": True}

@@ -105,6 +105,9 @@ mcp_servers["memory"] = memory_mcp
 # LLM 어댑터
 llm = create_llm_adapter(LLM_ADAPTER_TYPE, model=LLM_MODEL, mcp_servers=mcp_servers or None, cwd=PROJECT_ROOT)
 
+# add_memory MCP 툴이 용량 초과 시 LLM 통합기를 호출할 수 있도록 사후 주입.
+memory_mgr.llm = llm
+
 # 컨텍스트 압축, 세션 관리
 context_compressor = ContextCompressor()
 session_mgr = SessionManager(idle_timeout_minutes=SESSION_IDLE_TIMEOUT)
