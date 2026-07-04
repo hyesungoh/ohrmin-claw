@@ -13,7 +13,14 @@ from dotenv import load_dotenv
 # 프로젝트 루트를 sys.path에 추가
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.llm import create_llm_adapter
+from core.llm import create_llm_adapter, _CLAUDE_FALLBACK_MESSAGE
+from core.learning import (
+    should_propose_skill,
+    is_explicit_skill_request,
+    snapshot_skill_mtimes,
+    detect_skill_writes,
+    SKILL_RESTART_NOTICE,
+)
 from core.garmin_data import GarminConnectClient
 from core.garmin_tools import create_garmin_mcp_server
 from core.body_metrics import BodyMetricsManager
@@ -45,6 +52,9 @@ BODY_METRICS_CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)),
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts")
 MEMORY_MODE = os.getenv("MEMORY_MODE", "auto")  # auto | manual
+# 학습 루프(축4) — off|manual|auto, 기본 off (MEMORY_MODE 미러). 인터랙티브 오너 턴에서만 동작.
+LEARNING_MODE = os.getenv("LEARNING_MODE", "off")
+LEARNING_TOOL_THRESHOLD = int(os.getenv("LEARNING_TOOL_THRESHOLD", "5"))
 SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "1440"))  # 분 (기본 24시간)
 NOTIFY_CHANNEL_ID = os.getenv("NOTIFY_CHANNEL_ID")  # 자동 분석 결과 전송 채널
 APPLE_HEALTH_EXPORT_DIR = os.getenv(
@@ -53,6 +63,8 @@ APPLE_HEALTH_EXPORT_DIR = os.getenv(
 )
 SESSION_INDEX_DB_PATH = os.path.join(PROJECT_ROOT, "data", "session_index.db")
 CRON_JOBS_PATH = os.path.join(PROJECT_ROOT, "data", "cron_jobs.json")
+# 학습 루프 hot-load 폴백 — 이번 턴에 스킬이 저장/수정됐는지 감지할 대상 디렉토리.
+SKILLS_DIR = os.path.join(PROJECT_ROOT, ".claude", "skills")
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -422,6 +434,9 @@ async def handle_health_query(message: discord.Message, content: str, image_path
         await send_reply(target, text)
 
     status = ToolStatusLine(target)
+    # 학습 루프: 턴의 tool_use 횟수 카운트(counter) + 스킬 쓰기 감지용 사전 스냅샷.
+    counter = [0]
+    skills_before = snapshot_skill_mtimes(SKILLS_DIR)
 
     async with target.typing():
         # 인터랙티브 오너 턴 = 특권 턴. approve_skill_writes=True로 skill-write + schedule/memory
@@ -432,6 +447,7 @@ async def handle_health_query(message: discord.Message, content: str, image_path
             history=history,
             on_text=on_text,
             on_tool=status.update,
+            counter=counter,
             approve_skill_writes=True,
         )
     await status.clear()
@@ -446,12 +462,40 @@ async def handle_health_query(message: discord.Message, content: str, image_path
             turn_id,
         )
 
-    # auto 모드: 대화에서 메모리 추출
-    if MEMORY_MODE == "auto":
+    # hot-load 폴백: 이번 턴에 오너 승인으로 스킬이 저장/수정됐으면 재시작 안내.
+    # (SDK 스킬 hot-load를 라이브 확인할 수 없어 재시작 후 적용을 보장하는 폴백 경로를 택했다.)
+    new_skills = detect_skill_writes(SKILLS_DIR, skills_before)
+    if new_skills:
+        await send_reply(target, SKILL_RESTART_NOTICE.format(names=", ".join(new_skills)))
+
+    # 학습 루프 제안 판정 — 인터랙티브 + 성공 + (auto: 도구 5+ / manual: 명시 요청).
+    turn_ok = bool(reply_text) and reply_text != _CLAUDE_FALLBACK_MESSAGE
+    propose = should_propose_skill(
+        LEARNING_MODE,
+        interactive=True,
+        tool_count=counter[0],
+        success=turn_ok,
+        explicit_request=is_explicit_skill_request(content),
+        threshold=LEARNING_TOOL_THRESHOLD,
+    )
+
+    # auto 메모리 추출과 스킬 캡처 제안을 단일 extract_and_save 패스로 coalesce(M4, 별도 왕복 금지).
+    if MEMORY_MODE == "auto" or propose:
         conversation = [{"role": "user", "content": content}]
         if history:
             conversation = history + conversation
-        await memory_mgr.extract_and_save(llm, conversation)
+        proposal = await memory_mgr.extract_and_save(
+            llm,
+            conversation,
+            propose_skill=propose,
+            save_memory=(MEMORY_MODE == "auto"),
+        )
+        if propose and proposal:
+            await send_reply(
+                target,
+                f"💡 이 분석 절차를 재사용 스킬로 저장할까요? — {proposal}\n"
+                f'원하시면 "스킬로 저장해"라고 말씀해 주세요.',
+            )
 
 
 async def generate_weekly_report() -> str:
