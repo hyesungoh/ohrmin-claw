@@ -25,6 +25,8 @@ from core.memory import MemoryManager
 from core.context_compressor import ContextCompressor
 from core.session_manager import SessionManager
 from core.apple_health_reader import sync_from_icloud
+from core.session_index import SessionIndex
+from core.session_search_tools import create_session_search_mcp_server
 
 
 load_dotenv()
@@ -46,6 +48,7 @@ APPLE_HEALTH_EXPORT_DIR = os.getenv(
     "APPLE_HEALTH_EXPORT_DIR",
     os.path.expanduser("~/Library/Mobile Documents/iCloud~com~ifunography~HealthExport/Documents/daily inbody"),
 )
+SESSION_INDEX_DB_PATH = os.path.join(PROJECT_ROOT, "data", "session_index.db")
 
 
 def parse_allowed_users(raw: str) -> set[int]:
@@ -87,6 +90,9 @@ if GARMIN_EMAIL and GARMIN_PASSWORD:
         garmin = None
 body_metrics_mgr = BodyMetricsManager(BODY_METRICS_CSV_PATH)
 
+# 대화 장기기억 인덱스 (FTS5)
+session_index = SessionIndex(SESSION_INDEX_DB_PATH)
+
 # MCP 서버 생성
 mcp_servers = {}
 if garmin:
@@ -101,6 +107,10 @@ mcp_servers["body_metrics"] = body_metrics_mcp
 memory_mgr = MemoryManager(PROMPTS_DIR)
 memory_mcp = create_memory_mcp_server(memory_mgr)
 mcp_servers["memory"] = memory_mcp
+
+# 세션 검색 MCP (과거 대화 FTS5 전문 검색 → mcp__session_search__search)
+session_search_mcp = create_session_search_mcp_server(session_index)
+mcp_servers["session_search"] = session_search_mcp
 
 # LLM 어댑터
 llm = create_llm_adapter(LLM_ADAPTER_TYPE, model=LLM_MODEL, mcp_servers=mcp_servers or None, cwd=PROJECT_ROOT)
@@ -162,6 +172,29 @@ async def send_reply(target: discord.abc.Messageable, text: str):
     """채널 추상화의 _split_message를 사용하여 메시지를 전송."""
     for chunk in channel._split_message(text):
         await target.send(chunk)
+
+
+def _iso_ts(dt) -> str:
+    """datetime → ISO 문자열. None/변환 실패 시 현재 UTC."""
+    try:
+        if dt is not None:
+            return dt.isoformat()
+    except Exception:
+        pass
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+async def _index_turn_message(thread_id, ts, role, content, turn_id=None):
+    """세션 인덱스 write를 스레드로 오프로드 (on_message 지연 방지). best-effort.
+
+    봇 답변은 청크 send_reply가 아니라 턴 반환값에서 1회만 색인해 파편화를 막는다.
+    """
+    try:
+        await asyncio.to_thread(
+            session_index.index_message, str(thread_id), str(ts), role, content, turn_id
+        )
+    except Exception as e:
+        print(f"⚠️ 세션 인덱스 색인 실패: {e}")
 
 
 def _collect_health_context() -> dict:
@@ -250,8 +283,19 @@ async def handle_health_query(message: discord.Message, content: str, image_path
         session_mgr.update_activity(thread_id)
     else:
         target = await message.create_thread(name=content[:100])
-        session_mgr.update_activity(target.id)
+        thread_id = target.id
+        session_mgr.update_activity(thread_id)
         history = None
+
+    # 유저 메시지 색인 (화이트리스트는 on_message에서 이미 통과).
+    # 첫 채널 메시지도 생성된 thread.id로 키잉해 부모 채널 고아화를 막는다.
+    # 이미지-only(빈 텍스트)는 index_message가 스킵.
+    turn_id = str(getattr(message, "id", "") or "")
+    user_text = (getattr(message, "content", "") or "").strip()
+    if user_text:
+        await _index_turn_message(
+            thread_id, _iso_ts(getattr(message, "created_at", None)), "user", user_text, turn_id
+        )
 
     # 이미지 경로가 있으면 프롬프트에 포함
     if image_paths:
@@ -262,10 +306,20 @@ async def handle_health_query(message: discord.Message, content: str, image_path
         await send_reply(target, text)
 
     async with target.typing():
-        await llm.ask_with_context(
+        reply_text = await llm.ask_with_context(
             full_system, content, context,
             history=history,
             on_text=on_text,
+        )
+
+    # 봇 답변은 턴 반환값에서 1회 색인 (청크 send_reply 아님 → 파편화 방지).
+    if reply_text:
+        await _index_turn_message(
+            thread_id,
+            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "assistant",
+            reply_text,
+            turn_id,
         )
 
     # auto 모드: 대화에서 메모리 추출
@@ -445,7 +499,7 @@ async def run_agent_to_channel(
         await send_reply(thread, text)
 
     async with thread.typing():
-        await run_agent_turn(
+        reply_text = await run_agent_turn(
             system,
             prompt,
             context,
@@ -454,6 +508,15 @@ async def run_agent_to_channel(
             max_turns=max_turns,
             approve_skill_writes=approve_skill_writes,
             allowed_tools=allowed_tools,
+        )
+
+    # 봇 답변을 생성된 thread.id로 색인 (턴 반환값에서 1회).
+    if reply_text:
+        await _index_turn_message(
+            thread.id,
+            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "assistant",
+            reply_text,
         )
     return thread
 
@@ -504,12 +567,47 @@ async def before_health_sync():
     await channel._client.wait_until_ready()
 
 
+_session_backfill_done = False
+
+
+async def _backfill_session_index():
+    """봇 시작 시 Discord 스레드 히스토리를 세션 인덱스에 1회 백필 (best-effort, 멱등)."""
+    try:
+        rows = []
+        for guild in channel._client.guilds:
+            for ch in getattr(guild, "text_channels", []):
+                for th in getattr(ch, "threads", []):
+                    try:
+                        async for msg in th.history(limit=50, oldest_first=True):
+                            text = (msg.content or "").strip()
+                            if not text:
+                                continue
+                            rows.append({
+                                "thread_id": str(th.id),
+                                "ts": _iso_ts(getattr(msg, "created_at", None)),
+                                "role": "assistant" if msg.author.bot else "user",
+                                "content": text,
+                                "turn_id": str(getattr(msg, "id", "") or ""),
+                            })
+                    except Exception:
+                        continue  # 스레드 단위 실패는 나머지 백필을 막지 않음
+        if rows:
+            added = await asyncio.to_thread(session_index.backfill, rows)
+            print(f"🔎 세션 인덱스 백필: {added}건 색인 (총 {len(rows)}건 스캔)")
+    except Exception as e:
+        print(f"⚠️ 세션 인덱스 백필 실패: {e}")
+
+
 @channel._client.event
 async def on_ready():
+    global _session_backfill_done
     print(f"✅ {channel._client.user} 로그인 완료!")
     if not health_sync_loop.is_running():
         health_sync_loop.start()
         print(f"📊 Apple Health 자동 동기화 시작 (2분 주기, 경로: {APPLE_HEALTH_EXPORT_DIR})")
+    if not _session_backfill_done:
+        _session_backfill_done = True
+        await _backfill_session_index()
 
 
 @channel._client.event
