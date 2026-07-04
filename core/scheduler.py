@@ -170,7 +170,11 @@ def due(job: dict, now: datetime.datetime) -> bool:
         next_run = datetime.datetime.fromisoformat(nr)
     except (ValueError, TypeError):
         return False
-    return now >= next_run
+    try:
+        return now >= next_run
+    except TypeError:
+        # naive/aware 불일치(손상된 잡) — 비교 불가 시 due 아님으로 처리해 tick 스톨을 막는다.
+        return False
 
 
 class CronStore:

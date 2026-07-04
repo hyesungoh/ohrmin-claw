@@ -79,6 +79,31 @@ class TestBackfillIdempotent:
         assert index.index_message("t1", "ts", "user", "동일 메시지") is False
 
 
+class TestSearchOperationalErrorGuard:
+    """F8: FTS MATCH가 OperationalError(이색적 토큰/예약어)를 던져도 []로 degrade."""
+
+    def test_operational_error_returns_empty(self, index, monkeypatch):
+        index.index_message("t1", "ts", "user", "수면 효율 분석")
+
+        real_connect = index._connect
+
+        class _BadConn:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, *args):
+                if sql.strip().upper().startswith("SELECT"):
+                    raise sqlite3.OperationalError("fts5: syntax error near token")
+                return self._conn.execute(sql, *args)
+
+            def close(self):
+                self._conn.close()
+
+        monkeypatch.setattr(index, "_connect", lambda: _BadConn(real_connect()))
+        # 예외가 전파되지 않고 빈 결과로 degrade해야 한다.
+        assert index.search("수면") == []
+
+
 class TestThreadKeying:
     def test_first_message_keyed_to_thread_id(self, index):
         # 첫 채널 메시지가 생성된 thread.id로 키잉되면 그 스레드에서 검색된다.

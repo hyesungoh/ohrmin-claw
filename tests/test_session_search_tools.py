@@ -44,3 +44,42 @@ class TestSessionSearchTool:
     async def test_server_name_and_tool_registered(self, index):
         create_session_search_mcp_server(index)
         assert "search" in TOOL_REGISTRY
+
+
+class _RecordingIndex:
+    """search 호출의 limit 인자를 기록하는 스텁."""
+
+    def __init__(self):
+        self.calls = []
+
+    def search(self, query, limit):
+        self.calls.append(limit)
+        return []
+
+
+class TestSearchLimitClamp:
+    """F7: limit을 [1, MAX_LIMIT]로 클램프 — 음수는 SQLite LIMIT -1(무제한)이 되므로 하한 1."""
+
+    @pytest.mark.asyncio
+    async def test_negative_limit_clamped_to_one(self):
+        idx = _RecordingIndex()
+        create_session_search_mcp_server(idx)
+        search_tool = TOOL_REGISTRY["search"]
+        await search_tool.handler({"query": "수면", "limit": -5})
+        assert idx.calls == [1]
+
+    @pytest.mark.asyncio
+    async def test_large_negative_limit_clamped_to_one(self):
+        idx = _RecordingIndex()
+        create_session_search_mcp_server(idx)
+        search_tool = TOOL_REGISTRY["search"]
+        await search_tool.handler({"query": "수면", "limit": -9999})
+        assert idx.calls == [1]
+
+    @pytest.mark.asyncio
+    async def test_excessive_limit_capped_to_max(self):
+        idx = _RecordingIndex()
+        create_session_search_mcp_server(idx)
+        search_tool = TOOL_REGISTRY["search"]
+        await search_tool.handler({"query": "수면", "limit": 9999})
+        assert idx.calls == [50]  # MAX_LIMIT

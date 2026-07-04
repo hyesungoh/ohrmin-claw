@@ -95,13 +95,11 @@ class SessionIndex:
             return '""'
         return " ".join('"' + t.replace('"', '""') + '"*' for t in terms)
 
-    def search(self, query: str, limit: int = 10, mode: str = "verbatim") -> list[dict]:
+    def search(self, query: str, limit: int = 10) -> list[dict]:
         """content를 전문 검색해 bm25 오름차순(관련도순)으로 반환.
 
         각 행: turn_id, thread_id, ts, role, content, snippet(하이라이트), score(bm25).
-        mode="verbatim"이 필수 경로 — 원문 행을 그대로 반환한다.
-        mode="digest"는 호출자 측 LLM 요약을 위한 예약 값으로, 인덱스는 언제나 verbatim 행을
-        반환한다(요약은 상위 계층 책임 — 인덱스는 순수 sqlite 레이어로 유지).
+        원문 행을 그대로 반환한다 — 요약은 상위 계층(호출자 LLM) 책임, 인덱스는 순수 sqlite 레이어로 유지.
         """
         if not query or not query.strip():
             return []
@@ -116,6 +114,9 @@ class SessionIndex:
                 "ORDER BY bm25(messages) LIMIT ?",
                 (match_expr, limit),
             ).fetchall()
+        except sqlite3.OperationalError:
+            # 이색적인 MATCH 토큰(예약어/구문 오류)은 OperationalError를 던질 수 있다 → 빈 결과로 degrade.
+            return []
         finally:
             conn.close()
         return [

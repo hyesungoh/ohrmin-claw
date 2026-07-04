@@ -118,6 +118,24 @@ class TestDue:
     def test_missing_next_run_not_due(self):
         assert due({"paused": False}, _at(2026, 7, 4, 10, 0)) is False
 
+    def test_naive_aware_mismatch_returns_false(self):
+        # F9: 손상된 잡의 naive next_run vs aware now 비교가 TypeError로 tick을 스톨시키지 않는다.
+        naive_job = {"next_run_iso": "2026-07-04T09:00:00", "paused": False}  # naive ISO
+        assert due(naive_job, _at(2026, 7, 4, 10, 0)) is False  # aware now → TypeError 삼켜 False
+
+    def test_one_bad_job_does_not_block_due_jobs(self, tmp_path):
+        # 한 손상 잡이 due_jobs 순회를 죽이지 않고, 정상 due 잡은 계속 반환된다.
+        store = CronStore(str(tmp_path / "cron_jobs.json"))
+        now = _at(2026, 7, 4, 10, 0)
+        good = store.create("정상 잡", "*/5 * * * *", now)
+        # 손상 잡을 직접 주입(naive next_run).
+        store._jobs["bad"] = {"id": "bad", "schedule": "0 20 * * 0", "paused": False,
+                              "next_run_iso": "2026-07-04T09:00:00"}
+        store.update(good["id"], next_run_iso=_at(2026, 7, 4, 9, 0).isoformat())  # 과거 → due
+        due_ids = [j["id"] for j in store.due_jobs(now)]
+        assert good["id"] in due_ids
+        assert "bad" not in due_ids  # 비교 불가 잡은 due 아님으로 조용히 제외
+
 
 class TestValidateSchedule:
     def test_valid_cron_and_relative(self):

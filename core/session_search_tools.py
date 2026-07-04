@@ -27,7 +27,8 @@ def create_session_search_mcp_server(index):
     @tool("search", "과거 대화 기록을 전문 검색 (FTS5 bm25 랭킹, 관련도순)", SEARCH_SCHEMA)
     async def search(args):
         query = args.get("query", "")
-        limit = min(int(args.get("limit", 10) or 10), MAX_LIMIT)
+        # limit을 [1, MAX_LIMIT]로 클램프. 음수면 SQLite LIMIT -1(무제한)이 되므로 하한 1을 강제한다.
+        limit = max(1, min(int(args.get("limit", 10) or 10), MAX_LIMIT))
         results = await asyncio.to_thread(index.search, query, limit)
         return _json_response(results)
 
