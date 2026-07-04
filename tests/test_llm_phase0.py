@@ -7,7 +7,7 @@ from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
 from core.llm import (
     ClaudeSDKAdapter,
     evaluate_skill_write_gate,
-    _make_skill_write_guard_hook,
+    _make_unattended_gate_hook,
     DEFAULT_ALLOWED_TOOLS,
 )
 
@@ -213,7 +213,7 @@ class TestSkillWriteGuardHook:
 
     @pytest.mark.asyncio
     async def test_hook_denies_skill_write(self):
-        hook = _make_skill_write_guard_hook(approve_skill_writes=False)
+        hook = _make_unattended_gate_hook(approve_skill_writes=False)
         out = await hook(
             {"tool_name": "Write", "tool_input": {"file_path": ".claude/skills/x/SKILL.md"}},
             "tid",
@@ -223,18 +223,24 @@ class TestSkillWriteGuardHook:
         assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
     @pytest.mark.asyncio
-    async def test_hook_allows_normal_write(self):
-        hook = _make_skill_write_guard_hook(approve_skill_writes=False)
-        out = await hook(
+    async def test_hook_denies_normal_write_unattended_allows_privileged(self):
+        # 무인 턴은 읽기 전용(F1) — 비-스킬 경로 write도 차단. 인터랙티브 승인 턴은 허용.
+        denied = await _make_unattended_gate_hook(approve_skill_writes=False)(
             {"tool_name": "Write", "tool_input": {"file_path": "data/x.md"}},
             "tid",
             {},
         )
-        assert out == {}
+        assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+        allowed = await _make_unattended_gate_hook(approve_skill_writes=True)(
+            {"tool_name": "Write", "tool_input": {"file_path": "data/x.md"}},
+            "tid",
+            {},
+        )
+        assert allowed == {}
 
     @pytest.mark.asyncio
     async def test_hook_science_reference_denies_even_with_approval(self):
-        hook = _make_skill_write_guard_hook(approve_skill_writes=True)
+        hook = _make_unattended_gate_hook(approve_skill_writes=True)
         out = await hook(
             {
                 "tool_name": "Edit",
@@ -261,7 +267,7 @@ class TestGateWiredIntoOptions:
 
         options = mock_query.call_args.kwargs["options"]
         matchers = options.hooks["PreToolUse"]
-        assert matchers[0].matcher == "Write|Edit|MultiEdit|NotebookEdit"
+        assert matchers[0].matcher == "Bash|Write|Edit|MultiEdit|NotebookEdit"
         # 배선된 훅이 실제로 skill-write를 차단하는지(승인 없음)
         guard = matchers[0].hooks[0]
         out = await guard(

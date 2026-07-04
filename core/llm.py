@@ -1,6 +1,7 @@
 """LLM 어댑터 레이어 — Claude Agent SDK 기반."""
 import json
 import os
+import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
@@ -74,7 +75,17 @@ _MUTATION_MCP_TOOLS = {
     "mcp__memory__remove_memory",
 }
 
-# PreToolUse 매처(정규식) — 위 mutation 도구에 훅을 발화시킨다. list/read 도구명은 매칭되지 않는다.
+# 무인 턴 = 읽기 전용 불변식. 셸(Bash)과 모든 파일-쓰기 도구를 하드 차단한다. bypassPermissions
+# 하에서 무인 초기자(cron·자동분석)가 Bash로 스킬/메모리/data 파일을 우회 기록하거나(예:
+# `echo … > .claude/skills/…`, prompts/memory.md, data/cron_jobs.json) 파일을 직접 쓰는 경로를
+# 구조적으로 봉쇄한다. 웹 콘텐츠(WebSearch/WebFetch) 인젝션이 이를 유도해도 게이트에서 막힌다.
+_UNATTENDED_DENIED_TOOLS = {"Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"}
+
+# PreToolUse 매처(정규식) — Bash + 파일-쓰기 도구에 훅을 발화시킨다. 무인 턴은 전부 차단,
+# 인터랙티브 승인 턴은 게이트 함수가 허용(단 .claude/skills/** 규칙은 별도 적용).
+_UNATTENDED_TOOL_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit"
+
+# PreToolUse 매처(정규식) — mutation MCP 도구에 훅을 발화시킨다. list/read 도구명은 매칭되지 않는다.
 # 게이트 함수가 최종 판정을 하므로 매처가 다소 넓게 걸려도 안전하다.
 _MUTATION_TOOL_MATCHER = (
     r"mcp__schedule__schedule_(create|pause|resume|remove)"
@@ -87,21 +98,26 @@ def evaluate_tool_gate(
     tool_input: dict | None,
     approve_privileged: bool = False,
 ) -> tuple[bool, str]:
-    """통합 무인-권한 게이트 — 특권 작업을 인터랙티브 승인 턴에서만 허용.
+    """통합 무인-권한 게이트 — 무인 턴을 읽기 전용으로 강제, 쓰기/특권은 인터랙티브 승인 턴만.
 
     approve_privileged(= 인터랙티브 오너 턴의 approve_skill_writes True)일 때만 허용:
+    - Bash 및 파일-쓰기 도구(Write/Edit/MultiEdit/NotebookEdit).
     - `.claude/skills/**` 쓰기 (science-reference는 승인해도 무조건 차단).
     - schedule/memory mutation MCP 도구(create/pause/resume/remove, add/replace/remove_memory).
 
-    무인 턴(승인 없음)에서는 위 작업을 하드 차단(permissionDecision: deny)한다. schedule_list·
-    list_memory·읽기 도구는 언제나 허용. `permission_mode="bypassPermissions"` 하에서도
-    PreToolUse 훅은 발화하므로 이 게이트가 구조적 강제선이다(allowed_tools 스티어링보다 강함).
+    무인 턴(승인 없음)에서는 위 전부를 하드 차단(permissionDecision: deny)한다 — 즉 무인 턴은
+    읽기/조회/분석(Read/Glob/Grep/Skill/web read/read MCP·schedule_list·list_memory)만 가능하다.
+    `permission_mode="bypassPermissions"` 하에서도 PreToolUse 훅은 발화하므로 이 게이트가 구조적
+    강제선이다(allowed_tools 스티어링보다 강함).
     """
-    # 1) 스킬 파일 쓰기 게이트(기존 로직 재사용).
+    # 1) 스킬 파일 쓰기 게이트(기존 로직 재사용) — science-reference는 특권이어도 무조건 차단.
     allow, reason = evaluate_skill_write_gate(tool_name, tool_input, approve_privileged)
     if not allow:
         return allow, reason
-    # 2) schedule/memory mutation — 무인 턴 하드 차단.
+    # 2) 무인 턴 = 읽기 전용 — Bash + 파일-쓰기 도구를 전부 하드 차단(경로 무관).
+    if not approve_privileged and tool_name in _UNATTENDED_DENIED_TOOLS:
+        return False, f"무인 턴은 읽기 전용입니다 — {tool_name}는 인터랙티브 오너 세션에서만 허용됩니다."
+    # 3) schedule/memory mutation — 무인 턴 하드 차단.
     if tool_name in _MUTATION_MCP_TOOLS and not approve_privileged:
         return False, f"{tool_name}는 인터랙티브 오너 세션 승인이 필요합니다 (무인 턴 차단)."
     return True, ""
@@ -134,10 +150,6 @@ def _make_unattended_gate_hook(approve_skill_writes: bool) -> Callable:
         }
 
     return _guard
-
-
-# 하위 호환 별칭 — 기존 임포트/테스트(_make_skill_write_guard_hook)를 유지.
-_make_skill_write_guard_hook = _make_unattended_gate_hook
 
 
 class LLMAdapter(ABC):
@@ -183,6 +195,9 @@ class ClaudeSDKAdapter(LLMAdapter):
         # steer(interrupt-then-restart)를 위해 스레드별 단일 클라이언트를 재사용한다.
         # 무인 초기자(cron·자동분석)는 여기 등록하지 않고 one-shot query() 경로를 유지한다.
         self._clients: dict = {}
+        # 각 라이브 클라이언트가 connect된 시점의 system_prompt (thread_id → prompt).
+        # 후속 턴에 프롬프트(메모리/목표)가 바뀌면 재접속해 hot-reload를 유지한다.
+        self._client_prompts: dict = {}
 
     async def _consume_stream(
         self,
@@ -247,12 +262,12 @@ class ClaudeSDKAdapter(LLMAdapter):
             )
             options_kwargs["permission_mode"] = "bypassPermissions"
             # 통합 무인-권한 게이트 — bypassPermissions 하에서도 PreToolUse 훅은 발화한다.
-            # matcher[0]: skill-write 도구(Write/Edit/...). matcher[1]: schedule/memory mutation
-            # MCP 도구. 무인 턴(approve False)은 둘 다 하드 차단, 인터랙티브 승인 턴은 허용.
+            # matcher[0]: Bash + 파일-쓰기 도구(무인=읽기 전용 강제). matcher[1]: schedule/memory
+            # mutation MCP 도구. 무인 턴(approve False)은 둘 다 하드 차단, 인터랙티브 승인 턴은 허용.
             options_kwargs["hooks"] = {
                 "PreToolUse": [
                     HookMatcher(
-                        matcher="Write|Edit|MultiEdit|NotebookEdit",
+                        matcher=_UNATTENDED_TOOL_MATCHER,
                         hooks=[_make_unattended_gate_hook(approve)],
                     ),
                     HookMatcher(
@@ -284,26 +299,34 @@ class ClaudeSDKAdapter(LLMAdapter):
             )
         except Exception as e:
             # 원시 예외/트레이스 대신 한국어 폴백을 스트림·반환에 전달 (provider 내부 미노출).
+            # 트레이스백은 서버 로그에만 남겨 디버깅을 돕는다(사용자엔 미노출).
             print(f"⚠️ Claude 생성 실패: {type(e).__name__}: {e}")
+            traceback.print_exc()
             if on_text:
                 await on_text(_CLAUDE_FALLBACK_MESSAGE)
             return _CLAUDE_FALLBACK_MESSAGE
         return "\n".join(result_texts) if result_texts else ""
 
     async def _get_or_create_client(
-        self, thread_id, options: ClaudeAgentOptions
+        self, thread_id, options: ClaudeAgentOptions, system_prompt: str
     ) -> ClaudeSDKClient:
         """스레드별 stateful 클라이언트를 반환 (없으면 connect 후 등록).
 
-        최초 인터랙티브 턴에 생성되어 후속 턴에 재사용된다. 재사용 시 options는 최초 connect
-        시점 값이 유지된다(stateful 세션이므로 system_prompt 등은 턴마다 갱신되지 않음 — 세션
-        만료/재생성 시 새 프롬프트로 다시 조립된다).
+        최초 인터랙티브 턴에 생성되어 후속 턴에 재사용된다. 단, 후속 턴의 system_prompt가
+        connect 시점과 달라졌으면(메모리/목표 편집) 기존 클라이언트를 disconnect하고 새
+        프롬프트로 재접속해 hot-reload를 유지한다. steer는 재접속 경계를 넘어 계속 동작한다
+        (다음 턴은 새 클라이언트를 interrupt/재사용).
         """
         client = self._clients.get(thread_id)
+        if client is not None and self._client_prompts.get(thread_id) != system_prompt:
+            # 시스템 프롬프트 변경 → 새 프롬프트로 재접속(구 클라이언트 정리).
+            await self.end_session(thread_id)
+            client = None
         if client is None:
             client = ClaudeSDKClient(options=options)
             await client.connect()
             self._clients[thread_id] = client
+            self._client_prompts[thread_id] = system_prompt
         return client
 
     async def _call_claude_persistent(
@@ -328,14 +351,16 @@ class ClaudeSDKAdapter(LLMAdapter):
             system_prompt, max_turns, approve_skill_writes, allowed_tools
         )
         try:
-            client = await self._get_or_create_client(thread_id, options)
+            client = await self._get_or_create_client(thread_id, options, system_prompt)
             await client.query(user_message)
             result_texts = await self._consume_stream(
                 client.receive_response(), on_text=on_text, on_tool=on_tool, counter=counter
             )
         except Exception as e:
             # 깨진 클라이언트는 폐기 → 다음 턴에 새로 생성. 폴백을 스트림·반환에 전달.
+            # 트레이스백은 서버 로그에만 남긴다(사용자엔 미노출).
             print(f"⚠️ Claude 생성 실패(persistent): {type(e).__name__}: {e}")
+            traceback.print_exc()
             await self.end_session(thread_id)
             if on_text:
                 await on_text(_CLAUDE_FALLBACK_MESSAGE)
@@ -350,6 +375,7 @@ class ClaudeSDKAdapter(LLMAdapter):
 
     async def end_session(self, thread_id) -> None:
         """스레드 세션 종료 — 클라이언트 disconnect + 풀에서 제거 (누수 방지, 멱등)."""
+        self._client_prompts.pop(thread_id, None)
         client = self._clients.pop(thread_id, None)
         if client is not None:
             try:
@@ -357,9 +383,28 @@ class ClaudeSDKAdapter(LLMAdapter):
             except Exception as e:
                 print(f"⚠️ 세션 클라이언트 정리 실패(thread={thread_id}): {type(e).__name__}: {e}")
 
+    async def close_all(self) -> None:
+        """모든 스레드 클라이언트를 disconnect (봇 종료 시 서브프로세스 누수 방지)."""
+        for thread_id in list(self._clients.keys()):
+            await self.end_session(thread_id)
+
+    def session_ids(self) -> list:
+        """활성 persistent 클라이언트를 가진 스레드 ID 목록 (만료 스윕용)."""
+        return list(self._clients.keys())
+
     def has_session(self, thread_id) -> bool:
         """스레드에 활성 persistent 클라이언트가 있는지."""
         return thread_id in self._clients
+
+    def _will_reconnect(self, thread_id, system_prompt: str) -> bool:
+        """이번 턴에 클라이언트가 새로(재)접속되는지 — 세션 없음이거나 system_prompt 변경 시 True.
+
+        fresh(재접속) 턴은 대화 이력을 다시 folding해 클라이언트를 rehydrate해야 하고,
+        라이브 재사용 턴은 클라이언트가 이력을 보유하므로 folding을 생략한다(F3, 중복 방지).
+        """
+        if thread_id not in self._clients:
+            return True
+        return self._client_prompts.get(thread_id) != system_prompt
 
     async def ask(
         self,
@@ -421,9 +466,14 @@ class ClaudeSDKAdapter(LLMAdapter):
         thread_id가 주어지면(인터랙티브 스레드) 스레드별 stateful 클라이언트를 재사용하는
         persistent 경로로 라우팅한다. None이면(무인 초기자·유틸 호출) 기존 one-shot query()
         경로를 유지한다 — steer/상태 세션은 인터랙티브 전용(매트릭스).
+
+        persistent 경로에서 라이브 클라이언트를 재사용할 때는 대화 이력을 다시 folding하지
+        않는다(F3): 클라이언트가 이미 이력을 보유하므로 중복 컨텍스트/토큰 증가를 피한다.
+        fresh(재시작/프롬프트 변경 후 재접속) 턴만 이력을 folding해 rehydrate한다.
         """
-        augmented_message = self._augment_message(user_message, context, history)
         if thread_id is not None:
+            fold_history = history if self._will_reconnect(thread_id, system_prompt) else None
+            augmented_message = self._augment_message(user_message, context, fold_history)
             return await self._call_claude_persistent(
                 thread_id,
                 system_prompt,
@@ -435,6 +485,7 @@ class ClaudeSDKAdapter(LLMAdapter):
                 approve_skill_writes=approve_skill_writes,
                 allowed_tools=allowed_tools,
             )
+        augmented_message = self._augment_message(user_message, context, history)
         return await self._call_claude(
             system_prompt,
             augmented_message,

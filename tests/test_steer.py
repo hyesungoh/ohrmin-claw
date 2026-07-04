@@ -155,7 +155,7 @@ class TestPersistentSafetyGate:
 
         opts = adapter._clients[T].options  # ClaudeSDKClient 생성자에 넘어간 옵션
         matchers = opts.hooks["PreToolUse"]
-        assert matchers[0].matcher == "Write|Edit|MultiEdit|NotebookEdit"
+        assert matchers[0].matcher == "Bash|Write|Edit|MultiEdit|NotebookEdit"
         assert matchers[1].matcher  # schedule/memory mutation matcher 배선
 
         guard = matchers[0].hooks[0]
@@ -251,6 +251,7 @@ class TestInterruptThenRestart:
             [_text_msg("turn2-response")],                            # turn 1: 재시작 응답
         ]
         adapter._clients[T] = fc  # 사전 주입 → 재사용(누수 없이 같은 클라이언트)
+        adapter._client_prompts[T] = "SYS"  # 라이브 클라이언트의 프롬프트 기록(재접속 방지)
 
         collect1, collect2 = [], []
 
@@ -279,14 +280,16 @@ class TestInterruptThenRestart:
         assert collect1 == ["turn1-block0"]  # 첫 블록만 발화, 아직 진행 중
 
         # 턴 2 도착 → interrupt-then-restart.
-        result2 = await main._steer_and_run(T, gen2)
-        r1 = await task1
+        result2, superseded2 = await main._steer_and_run(T, gen2)
+        r1, superseded1 = await task1
 
         assert fc.interrupt_count == 1              # interrupt 정확히 1회
         assert collect1 == ["turn1-block0"]         # 1번째 프롬프트 남은 블록(block1) 미발화
         assert r1 == "turn1-block0"                 # 턴1 반환은 interrupt 시점까지의 부분 텍스트
+        assert superseded1 is True                  # 턴1은 밀려남 → 후처리 스킵 신호(F2)
         assert collect2 == ["turn2-response"]       # 2번째 프롬프트 on_text 수신
         assert result2 == "turn2-response"
+        assert superseded2 is False                 # 턴2는 살아남음 → 후처리 수행
         assert len(fc.queries) == 2                 # 같은 클라이언트 재사용(재접속 아님)
         assert fc.connect_count == 0                # 사전 주입 → 재접속 없음
         assert main._inflight_turns.get(T) is None  # 진행 태스크 정리됨
@@ -306,14 +309,16 @@ class TestInterruptThenRestart:
         def gen(tag):
             return lambda: adapter.ask_with_context("SYS", tag, {}, thread_id=T)
 
-        r1 = await main._steer_and_run(T, gen("q1"))
-        r2 = await main._steer_and_run(T, gen("q2"))
+        r1, superseded1 = await main._steer_and_run(T, gen("q1"))
+        r2, superseded2 = await main._steer_and_run(T, gen("q2"))
 
         client = adapter._clients[T]
         assert client.interrupt_count == 0   # 진행 중 턴 없음 → interrupt 미발생
         assert len(client.queries) == 2
         assert r1 == "resp-0"
         assert r2 == "resp-1"
+        assert superseded1 is False          # 순차 실행 — 두 턴 모두 살아남음
+        assert superseded2 is False
         assert main._inflight_turns.get(T) is None
 
 
@@ -386,3 +391,193 @@ class TestExpiredThreadCleanup:
 
         # 만료된 스레드의 stateful 클라이언트가 정리되어야 한다.
         mock_llm.end_session.assert_awaited_once_with(thread.id)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# (F3) persistent 클라이언트 — 라이브 재사용 시 이력 folding 생략 + 프롬프트 변경 시 재접속
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestPersistentHistoryFold:
+    @pytest.mark.asyncio
+    async def test_fresh_client_folds_history(self, monkeypatch):
+        monkeypatch.setattr("core.llm.ClaudeSDKClient", FakeClient)
+        adapter = ClaudeSDKAdapter(cwd="/proj")
+        T = 100
+        history = [{"role": "user", "content": "이전질문X"},
+                   {"role": "assistant", "content": "이전답X"}]
+        await adapter.ask_with_context("SYS", "q1", {"k": "v"}, history=history, thread_id=T)
+        q = adapter._clients[T].queries[0]
+        assert "[대화 이력]" in q          # fresh(최초) 클라이언트 → 이력 folding으로 rehydrate
+        assert "이전질문X" in q
+
+    @pytest.mark.asyncio
+    async def test_reused_live_client_omits_history(self, monkeypatch):
+        monkeypatch.setattr("core.llm.ClaudeSDKClient", FakeClient)
+        adapter = ClaudeSDKAdapter(cwd="/proj")
+        T = 101
+        await adapter.ask_with_context("SYS", "q1", {}, thread_id=T)  # 최초(fresh)
+        history = [{"role": "user", "content": "직전질문Y"}]
+        await adapter.ask_with_context(
+            "SYS", "q2", {"k": "v"}, history=history, thread_id=T
+        )  # 라이브 재사용
+        q2 = adapter._clients[T].queries[1]
+        assert "[대화 이력]" not in q2      # 라이브 재사용 → 이력 folding 생략(클라이언트가 보유)
+        assert "직전질문Y" not in q2
+        assert "[데이터 컨텍스트]" in q2     # 데이터 컨텍스트/질문은 여전히 전달
+        assert "[질문]" in q2
+
+    @pytest.mark.asyncio
+    async def test_same_system_prompt_no_reconnect(self, monkeypatch):
+        monkeypatch.setattr("core.llm.ClaudeSDKClient", FakeClient)
+        adapter = ClaudeSDKAdapter(cwd="/proj")
+        T = 102
+        await adapter.ask_with_context("SYS", "q1", {}, thread_id=T)
+        c = adapter._clients[T]
+        await adapter.ask_with_context("SYS", "q2", {}, thread_id=T)
+        assert adapter._clients[T] is c   # 같은 프롬프트 → 재접속 없이 재사용
+        assert c.connect_count == 1
+        assert c.disconnect_count == 0
+
+    @pytest.mark.asyncio
+    async def test_changed_system_prompt_reconnects_and_refolds(self, monkeypatch):
+        monkeypatch.setattr("core.llm.ClaudeSDKClient", FakeClient)
+        adapter = ClaudeSDKAdapter(cwd="/proj")
+        T = 103
+        await adapter.ask_with_context("SYS_A", "q1", {}, thread_id=T)
+        first = adapter._clients[T]
+        history = [{"role": "user", "content": "직전질문Z"}]
+        await adapter.ask_with_context(
+            "SYS_B", "q2", {}, history=history, thread_id=T
+        )  # 시스템 프롬프트 변경(메모리/목표 편집) → 재접속
+        assert first.disconnect_count == 1        # 구 클라이언트 정리
+        new_client = adapter._clients[T]
+        assert new_client is not first            # 재접속(새 클라이언트)
+        assert new_client.connect_count == 1
+        assert new_client.options.system_prompt == "SYS_B"  # 새 프롬프트로 hot-reload
+        # 재접속=fresh → 이력을 refold해 rehydrate.
+        assert "[대화 이력]" in new_client.queries[0]
+        assert "직전질문Z" in new_client.queries[0]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# (F4) close_all — 봇 종료 시 모든 클라이언트 disconnect + 만료 세션 스윕
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestCloseAll:
+    @pytest.mark.asyncio
+    async def test_close_all_disconnects_every_client(self, monkeypatch):
+        monkeypatch.setattr("core.llm.ClaudeSDKClient", FakeClient)
+        adapter = ClaudeSDKAdapter(cwd="/proj")
+        await adapter.ask_with_context("SYS", "q", {}, thread_id=1)
+        await adapter.ask_with_context("SYS", "q", {}, thread_id=2)
+        c1, c2 = adapter._clients[1], adapter._clients[2]
+        assert set(adapter.session_ids()) == {1, 2}
+
+        await adapter.close_all()
+
+        assert c1.disconnect_count == 1
+        assert c2.disconnect_count == 1
+        assert adapter._clients == {}
+        assert adapter.session_ids() == []
+
+    @pytest.mark.asyncio
+    async def test_close_all_empty_is_noop(self, monkeypatch):
+        monkeypatch.setattr("core.llm.ClaudeSDKClient", FakeClient)
+        adapter = ClaudeSDKAdapter(cwd="/proj")
+        await adapter.close_all()  # 예외 없이 통과
+        assert adapter._clients == {}
+
+
+class TestExpiredSessionSweep:
+    @pytest.mark.asyncio
+    async def test_sweep_ends_only_expired_sessions(self):
+        import bot.main as main
+
+        main._inflight_turns.clear()
+        mock_llm = MagicMock()
+        mock_llm.session_ids.return_value = [111, 222]
+        mock_llm.end_session = AsyncMock()
+        mock_sess = MagicMock()
+        mock_sess.is_expired.side_effect = lambda tid: tid == 111  # 111만 만료
+
+        with patch("bot.main.llm", mock_llm), patch("bot.main.session_mgr", mock_sess):
+            await main._sweep_expired_sessions()
+
+        mock_llm.end_session.assert_awaited_once_with(111)
+        mock_sess.clear.assert_called_once_with(111)
+
+    @pytest.mark.asyncio
+    async def test_sweep_skips_inflight_thread(self):
+        import bot.main as main
+
+        main._inflight_turns.clear()
+        main._inflight_turns[333] = "진행중-센티넬"  # 생성 진행 중
+        mock_llm = MagicMock()
+        mock_llm.session_ids.return_value = [333]
+        mock_llm.end_session = AsyncMock()
+        mock_sess = MagicMock()
+        mock_sess.is_expired.return_value = True  # 만료지만 진행 중이라 스윕 제외
+
+        with patch("bot.main.llm", mock_llm), patch("bot.main.session_mgr", mock_sess):
+            await main._sweep_expired_sessions()
+
+        mock_llm.end_session.assert_not_awaited()
+        main._inflight_turns.clear()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# (F2) steer로 밀려난(superseded) 턴은 후처리(색인/메모리 추출)를 건너뛴다
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestSupersededSkipsPostProcessing:
+    @pytest.mark.asyncio
+    async def test_superseded_turn_skips_indexing_and_extract(self):
+        import bot.main as main
+
+        main._inflight_turns.clear()
+        main._turn_state.clear()
+        thread = _make_mock_thread()
+        message = _make_mock_message("질문", thread=thread)
+
+        indexed_roles = []
+
+        async def fake_index(thread_id, ts, role, content, turn_id=None):
+            indexed_roles.append(role)
+
+        async def fake_steer(thread_id, gen_factory):
+            # 생성은 실제로 돌리되(부분 응답 확보) superseded=True로 반환(밀려난 턴 시뮬레이션).
+            result = await gen_factory()
+            return result, True
+
+        mock_llm = MagicMock()
+        mock_llm.ask_with_context = AsyncMock(return_value="부분응답")
+        mock_llm.end_session = AsyncMock()
+        mock_llm.interrupt_session = AsyncMock()
+
+        with patch("bot.main.llm", mock_llm), \
+             patch("bot.main.load_prompt", return_value="시스템"), \
+             patch("bot.main.garmin", None), \
+             patch("bot.main.body_metrics_mgr") as mock_body, \
+             patch("bot.main.memory_mgr") as mock_mem, \
+             patch("bot.main.session_mgr") as mock_sess, \
+             patch("bot.main.context_compressor") as mock_comp, \
+             patch("bot.main._index_turn_message", fake_index), \
+             patch("bot.main._steer_and_run", fake_steer), \
+             patch("bot.main.MEMORY_MODE", "auto"):
+            mock_body.read_latest.return_value = None
+            mock_mem.read_memory.return_value = ""
+            mock_mem.read_user.return_value = ""
+            mock_mem.extract_and_save = AsyncMock()
+            mock_sess.is_expired.return_value = False
+            mock_comp.compress = AsyncMock(return_value=[])
+
+            await main.handle_health_query(message, "질문")
+
+        # 유저 메시지는 생성 전 색인되지만, 밀려난 턴의 부분 봇 답변은 색인되지 않는다.
+        assert "user" in indexed_roles
+        assert "assistant" not in indexed_roles
+        # MEMORY_MODE=auto여도 밀려난 턴은 메모리 추출을 호출하지 않는다(경합 방지).
+        mock_mem.extract_and_save.assert_not_awaited()

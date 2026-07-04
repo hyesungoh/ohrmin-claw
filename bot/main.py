@@ -21,7 +21,7 @@ from core.learning import (
     detect_skill_writes,
     SKILL_RESTART_NOTICE,
 )
-from core.garmin_data import GarminConnectClient
+from core.garmin_data import GarminConnectClient, GarminDataError
 from core.garmin_tools import create_garmin_mcp_server
 from core.body_metrics import BodyMetricsManager
 from core.body_metrics_tools import create_body_metrics_mcp_server
@@ -173,13 +173,14 @@ channel = DiscordChannel(token=DISCORD_TOKEN or "")
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_IMAGES = 5
 
-# 무인 초기자(cron tick·자동 분석) 도구셋 — 권한 매트릭스: 읽기/분석 도구 + schedule_list만.
-# schedule mutation(create/pause/resume/remove)·skill-write(Write/Edit)·memory-write를 제외한다.
+# 무인 초기자(cron tick·자동 분석) 도구셋 — 권한 매트릭스: 읽기 전용 도구 + schedule_list만.
+# 무인 = 읽기 전용 불변식: Bash·파일-쓰기(Write/Edit)·schedule mutation·memory-write를 전부 제외한다.
 # 주의: permission_mode="bypassPermissions" 하에서 allowed_tools는 하드 샌드박스가 아니라 모델
-# 스티어링 신호에 가깝다(--allowedTools). skill-write는 PreToolUse 훅이 하드 차단하고,
-# schedule mutation은 무인 도구셋에서 제외해 무인 턴이 시도하지 않도록 강제한다.
+# 스티어링 신호에 가깝다(--allowedTools). 구조적 강제선은 PreToolUse 게이트(evaluate_tool_gate)로,
+# Bash + 파일-쓰기 + schedule/memory mutation을 무인 턴에 하드 차단한다. 이 목록은 그 위의
+# 스티어링 계층 — 무인 턴이 애초에 쓰기/셸 도구를 시도하지 않도록 읽기 전용 도구만 노출한다.
 UNATTENDED_ALLOWED_TOOLS = [
-    "Bash", "Read", "Glob", "Grep", "Skill", "WebSearch", "WebFetch",
+    "Read", "Glob", "Grep", "Skill", "WebSearch", "WebFetch",
     "mcp__garmin", "mcp__body_metrics", "mcp__session_search",
     "mcp__schedule__schedule_list",  # 무인: 조회만 (mutation 제외)
 ]
@@ -392,6 +393,10 @@ def _build_system_prompt() -> str:
 # 인터랙티브 스레드별 진행 중 생성 태스크 (thread_id → asyncio.Task) — steer 조율용.
 # 새 메시지가 오면 이 태스크를 interrupt한 뒤 새 생성으로 재시작(재개 아님)한다.
 _inflight_turns: dict = {}
+# 스레드별 현재 턴의 상태 홀더 (thread_id → {"superseded": bool}). steer로 밀려난 턴이
+# 자신의 후처리(색인/메모리/제안)를 건너뛰도록 하는 신호. 각 턴은 자신의 홀더 참조를 잡고,
+# 후행 턴이 그 홀더의 superseded를 동기적으로 True로 표시한다(dict 정체성 경합 없음).
+_turn_state: dict = {}
 
 
 async def _steer_and_run(thread_id, gen_factory):
@@ -400,9 +405,17 @@ async def _steer_and_run(thread_id, gen_factory):
     한 스레드의 stateful 클라이언트 스트림은 항상 한 생성만 읽게 직렬화해 인터리브/중복 스트림을
     막는다. interrupt는 "재개"가 아니라 "재시작": 이전 턴의 남은 on_text는 더 이상 발화되지 않고
     새 프롬프트로 다시 시작한다. 이전 턴이 제때 unwind하지 못하면 클라이언트를 강제 정리한다.
+
+    반환: (result, superseded). superseded=True면 이 턴은 후행 턴에 의해 밀려났으므로(부분 응답)
+    호출자는 후처리(부분 봇 답변 색인·메모리 추출·스킬 제안·재시작 안내)를 건너뛰어야 한다 —
+    살아남은 턴만 후처리해 memory.md 동시 read-modify-write 경합과 파편 색인을 피한다(F2).
     """
     existing = _inflight_turns.get(thread_id)
     if existing is not None and not existing.done():
+        # 이전 턴을 superseded로 표시(동기적) → 그 턴이 자기 후처리를 건너뛰게 한다.
+        prev_state = _turn_state.get(thread_id)
+        if prev_state is not None:
+            prev_state["superseded"] = True
         try:
             await llm.interrupt_session(thread_id)
         except Exception as e:
@@ -413,20 +426,34 @@ async def _steer_and_run(thread_id, gen_factory):
         if pending:
             print(f"⚠️ interrupt unwind 지연(thread={thread_id}) — 클라이언트 강제 정리 후 재시작")
             await llm.end_session(thread_id)
+    state = {"superseded": False}
+    _turn_state[thread_id] = state
     task = asyncio.create_task(gen_factory())
     _inflight_turns[thread_id] = task
     try:
-        return await task
+        result = await task
     finally:
         if _inflight_turns.get(thread_id) is task:
             _inflight_turns.pop(thread_id, None)
+            _turn_state.pop(thread_id, None)
+    return result, state["superseded"]
 
 
 async def handle_health_query(message: discord.Message, content: str, image_paths: list[str] | None = None):
     """스레드 기반 자연어 건강 질의 처리. TextBlock마다 즉시 전송."""
     full_system = _build_system_prompt()
 
-    context = await _collect_health_context_async()
+    # 항상-켜진 7일 기본 컨텍스트 수집 실패(Garmin 401/429 등)가 인터랙티브 사용자에게 침묵으로
+    # 이어지지 않도록 방어한다(F5). 실패 시 빈 컨텍스트로 degrade해 턴을 계속 진행하고, Claude는
+    # 필요 시 MCP 도구로 재조회하거나 일반 답변을 이어간다.
+    try:
+        context = await _collect_health_context_async()
+    except GarminDataError as e:
+        print(f"⚠️ 기본 컨텍스트 수집 실패(Garmin) — 빈 컨텍스트로 진행: {type(e).__name__}: {e}")
+        context = {}
+    except Exception as e:
+        print(f"⚠️ 기본 컨텍스트 수집 실패 — 빈 컨텍스트로 진행: {type(e).__name__}: {e}")
+        context = {}
 
     is_thread = isinstance(message.channel, discord.Thread)
 
@@ -437,9 +464,10 @@ async def handle_health_query(message: discord.Message, content: str, image_path
         # 세션 타임아웃 확인
         if session_mgr.is_expired(thread_id):
             session_mgr.clear(thread_id)
-            # 만료된 스레드의 stateful 클라이언트를 정리(누수 방지) + 진행 태스크 참조 제거.
+            # 만료된 스레드의 stateful 클라이언트를 정리(누수 방지) + 진행 태스크/상태 참조 제거.
             await llm.end_session(thread_id)
             _inflight_turns.pop(thread_id, None)
+            _turn_state.pop(thread_id, None)
             history = None
         else:
             history = await build_history_from_thread(message.channel, exclude_last=True)
@@ -493,8 +521,14 @@ async def handle_health_query(message: discord.Message, content: str, image_path
                 approve_skill_writes=True,
                 thread_id=thread_id,
             )
-        reply_text = await _steer_and_run(thread_id, _generate)
+        reply_text, superseded = await _steer_and_run(thread_id, _generate)
     await status.clear()
+
+    # steer로 밀려난(superseded) 턴은 부분 응답 상태 — 후처리를 전부 건너뛴다(F2). 살아남은
+    # 턴만 색인/메모리 추출/스킬 제안/재시작 안내를 수행해, 동시 read-modify-write 경합(memory.md)과
+    # 부분 답변의 파편 색인을 피한다.
+    if superseded:
+        return
 
     # 봇 답변은 턴 반환값에서 1회 색인 (청크 send_reply 아님 → 파편화 방지).
     if reply_text:
@@ -764,9 +798,27 @@ async def _run_auto_analysis(new_rows: list[dict]):
     )
 
 
+async def _sweep_expired_sessions():
+    """만료된 스레드의 persistent 클라이언트를 기회적으로 정리 (버려진 스레드 서브프로세스 누수 방지).
+
+    idle 타임아웃(session_mgr.is_expired)을 재사용한다. 진행 중 턴이 있는 스레드는 건드리지
+    않는다(_inflight_turns). best-effort — 한 스레드 정리 실패가 나머지를 막지 않는다.
+    """
+    for thread_id in llm.session_ids():
+        try:
+            if thread_id in _inflight_turns:
+                continue  # 생성 진행 중 — 스윕 대상 아님
+            if session_mgr.is_expired(thread_id):
+                await llm.end_session(thread_id)
+                session_mgr.clear(thread_id)
+                _turn_state.pop(thread_id, None)
+        except Exception as e:
+            print(f"⚠️ 세션 스윕 실패(thread={thread_id}): {type(e).__name__}: {e}")
+
+
 @tasks.loop(minutes=2)
 async def health_sync_loop():
-    """매 2분마다 iCloud에서 Apple Health 데이터 동기화."""
+    """매 2분마다 iCloud에서 Apple Health 데이터 동기화 + 만료 세션 스윕(기회적)."""
     try:
         new_rows = await asyncio.to_thread(sync_from_icloud, APPLE_HEALTH_EXPORT_DIR, body_metrics_mgr)
         if new_rows:
@@ -775,6 +827,8 @@ async def health_sync_loop():
             await _run_auto_analysis(new_rows)
     except Exception as e:
         print(f"⚠️ 자동 동기화 오류: {e}")
+    # 동기화와 독립적으로 만료 세션을 스윕(별도 try — 스윕 실패가 동기화 루프를 죽이지 않음).
+    await _sweep_expired_sessions()
 
 
 @health_sync_loop.before_loop
@@ -933,6 +987,24 @@ async def on_message(message: discord.Message):
         )
     finally:
         cleanup_temp_images(image_paths)
+
+
+# 봇 종료 시 모든 persistent 클라이언트를 정리(서브프로세스 누수 방지). discord.py의
+# Client.close()는 종료 시 이벤트 루프가 살아있는 동안 호출되므로, 이를 감싸 기본 종료 전에
+# close_all을 실행한다. on_disconnect(매 재접속마다 발화)가 아니라 실제 종료 경로만 탄다.
+_original_client_close = channel._client.close
+
+
+async def _close_with_cleanup():
+    """기본 종료 전에 llm.close_all()로 스레드 클라이언트를 모두 disconnect."""
+    try:
+        await llm.close_all()
+    except Exception as e:
+        print(f"⚠️ 종료 시 세션 정리 실패: {type(e).__name__}: {e}")
+    await _original_client_close()
+
+
+channel._client.close = _close_with_cleanup
 
 
 def main():

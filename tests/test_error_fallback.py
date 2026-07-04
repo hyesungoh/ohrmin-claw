@@ -1,9 +1,13 @@
-"""A4 에러 폴백 테스트 — Claude 생성 실패 시 한국어 폴백 + Garmin 401/429 안전 번역."""
+"""A4 에러 폴백 테스트 — Claude 생성 실패 시 한국어 폴백 + Garmin 401/429 안전 번역.
+
+F5: 인터랙티브 기본 컨텍스트 수집 중 Garmin 401/429가 나도 사용자에게 침묵이 아니라 응답이 가야 한다.
+"""
 import datetime
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 from garminconnect import (
     GarminConnectAuthenticationError,
     GarminConnectTooManyRequestsError,
@@ -137,3 +141,80 @@ class TestGarminErrorTranslation:
         api.get_activity_splits.side_effect = GarminConnectTooManyRequestsError("429")
         with pytest.raises(GarminRateLimitError):
             client.get_activity_detail("123")
+
+
+# ── F5: 인터랙티브 기본 컨텍스트 수집 Garmin 오류 → 침묵 아닌 응답 ─────────────
+
+
+class _FakeTyping:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+
+class TestBaseContextGarminFallback:
+    @pytest.mark.asyncio
+    async def test_garmin_error_in_base_context_still_replies(self):
+        """기본 7일 컨텍스트 수집이 429로 실패해도 턴은 빈 컨텍스트로 진행하고 사용자에게 응답한다."""
+        import bot.main as main
+
+        main._inflight_turns.clear()
+        main._turn_state.clear()
+
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 909
+
+        async def fake_history(limit=None, oldest_first=True):
+            for _ in ():
+                yield _
+
+        thread.history = fake_history
+        thread.send = AsyncMock()
+        thread.typing = MagicMock(return_value=_FakeTyping())
+
+        msg = MagicMock(spec=discord.Message)
+        msg.content = "오늘 수면 어때"
+        msg.id = 1
+        msg.created_at = None
+        msg.author = MagicMock()
+        msg.author.bot = False
+        msg.channel = thread
+
+        captured = {}
+
+        async def capture_ask(*args, on_text=None, **kwargs):
+            captured["called"] = True
+            captured["context"] = kwargs.get("context", args[2] if len(args) > 2 else None)
+            if on_text:
+                await on_text("안전 응답")  # 사용자에게 전송
+            return "안전 응답"
+
+        async def raise_rate_limit():
+            raise GarminRateLimitError("429 too many")
+
+        mock_llm = MagicMock()
+        mock_llm.ask_with_context = capture_ask
+        mock_llm.interrupt_session = AsyncMock()
+        mock_llm.end_session = AsyncMock()
+
+        with patch("bot.main.llm", mock_llm), \
+             patch("bot.main.load_prompt", return_value="시스템"), \
+             patch("bot.main.memory_mgr") as mock_mem, \
+             patch("bot.main.session_mgr") as mock_sess, \
+             patch("bot.main.context_compressor") as mock_comp, \
+             patch("bot.main._collect_health_context_async", side_effect=raise_rate_limit), \
+             patch("bot.main._index_turn_message", new=AsyncMock()), \
+             patch("bot.main.MEMORY_MODE", "manual"):
+            mock_mem.read_memory.return_value = ""
+            mock_mem.read_user.return_value = ""
+            mock_mem.extract_and_save = AsyncMock()
+            mock_sess.is_expired.return_value = False
+            mock_comp.compress = AsyncMock(return_value=[])
+
+            await main.handle_health_query(msg, "오늘 수면 어때")
+
+        assert captured.get("called") is True     # 생성이 실행됨(= 침묵 아님)
+        assert captured.get("context") == {}       # Garmin 429 → degrade된 빈 컨텍스트로 진행
+        thread.send.assert_awaited()               # 사용자에게 응답이 전송됨

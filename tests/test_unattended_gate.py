@@ -12,9 +12,10 @@ from core.llm import (
     ClaudeSDKAdapter,
     evaluate_tool_gate,
     _make_unattended_gate_hook,
-    _make_skill_write_guard_hook,
     _MUTATION_TOOL_MATCHER,
     _MUTATION_MCP_TOOLS,
+    _UNATTENDED_TOOL_MATCHER,
+    _UNATTENDED_DENIED_TOOLS,
 )
 
 
@@ -26,7 +27,7 @@ async def _fake_query(**kwargs):
 
 
 class TestEvaluateToolGateUnattended:
-    """무인 턴(approve_privileged=False) — mutation 하드 차단, list/read 허용."""
+    """무인 턴(approve_privileged=False) = 읽기 전용 — Bash·파일-쓰기·mutation 하드 차단, read 허용."""
 
     @pytest.mark.parametrize(
         "tool",
@@ -45,10 +46,40 @@ class TestEvaluateToolGateUnattended:
         assert allow is False
         assert reason
 
+    def test_bash_denied_when_unattended(self):
+        # 무인 턴은 셸 접근 불가 — echo 리다이렉트로 스킬/메모리/data 파일 우회 기록 차단(F1).
+        allow, reason = evaluate_tool_gate(
+            "Bash",
+            {"command": "echo x > .claude/skills/science-reference/SKILL.md"},
+            approve_privileged=False,
+        )
+        assert allow is False
+        assert reason
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "prompts/memory.md",
+            "prompts/user.md",
+            "data/cron_jobs.json",
+            ".claude/skills/x/SKILL.md",
+            "/tmp/anything.txt",
+            "data/inbody.csv",
+        ],
+    )
+    @pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit", "NotebookEdit"])
+    def test_any_file_write_denied_when_unattended(self, tool, path):
+        # 경로 무관 — 무인 턴의 모든 파일-쓰기를 하드 차단(스킬 경로에 한정되지 않음).
+        key = "notebook_path" if tool == "NotebookEdit" else "file_path"
+        allow, reason = evaluate_tool_gate(tool, {key: path}, approve_privileged=False)
+        assert allow is False
+        assert reason
+
     @pytest.mark.parametrize(
         "tool",
         ["mcp__schedule__schedule_list", "mcp__memory__list_memory",
-         "mcp__garmin__get_sleep", "Read", "WebSearch"],
+         "mcp__garmin__get_sleep", "Read", "Glob", "Grep", "Skill",
+         "WebSearch", "WebFetch", "mcp__session_search__search"],
     )
     def test_list_and_read_allowed_when_unattended(self, tool):
         allow, _ = evaluate_tool_gate(tool, {}, approve_privileged=False)
@@ -62,11 +93,25 @@ class TestEvaluateToolGateUnattended:
 
 
 class TestEvaluateToolGateInteractive:
-    """인터랙티브 오너 턴(approve_privileged=True) — mutation 허용."""
+    """인터랙티브 오너 턴(approve_privileged=True) — Bash·파일-쓰기·mutation 허용."""
 
     @pytest.mark.parametrize("tool", sorted(_MUTATION_MCP_TOOLS))
     def test_mutation_allowed_when_interactive(self, tool):
         allow, _ = evaluate_tool_gate(tool, {}, approve_privileged=True)
+        assert allow is True
+
+    def test_bash_allowed_when_interactive(self):
+        allow, _ = evaluate_tool_gate(
+            "Bash", {"command": "ls -la"}, approve_privileged=True
+        )
+        assert allow is True
+
+    @pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit", "NotebookEdit"])
+    def test_non_skill_file_write_allowed_when_interactive(self, tool):
+        key = "notebook_path" if tool == "NotebookEdit" else "file_path"
+        allow, _ = evaluate_tool_gate(
+            tool, {key: "prompts/memory.md"}, approve_privileged=True
+        )
         assert allow is True
 
     def test_skill_write_allowed_when_interactive(self):
@@ -79,6 +124,15 @@ class TestEvaluateToolGateInteractive:
         allow, reason = evaluate_tool_gate(
             "Write",
             {"file_path": ".claude/skills/science-reference/SKILL.md"},
+            approve_privileged=True,
+        )
+        assert allow is False
+        assert "science-reference" in reason
+
+    def test_science_reference_edit_denied_even_interactive(self):
+        allow, reason = evaluate_tool_gate(
+            "Edit",
+            {"file_path": "/proj/.claude/skills/science-reference/references/x.md"},
             approve_privileged=True,
         )
         assert allow is False
@@ -106,12 +160,42 @@ class TestUnattendedGateHook:
         assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     @pytest.mark.asyncio
+    async def test_hook_denies_bash_unattended(self):
+        hook = _make_unattended_gate_hook(approve_skill_writes=False)
+        out = await hook(
+            {"tool_name": "Bash", "tool_input": {"command": "echo hi > prompts/memory.md"}},
+            "tid",
+            {},
+        )
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    @pytest.mark.asyncio
+    async def test_hook_denies_write_any_path_unattended(self):
+        hook = _make_unattended_gate_hook(approve_skill_writes=False)
+        out = await hook(
+            {"tool_name": "Write", "tool_input": {"file_path": "data/cron_jobs.json"}},
+            "tid",
+            {},
+        )
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    @pytest.mark.asyncio
     async def test_hook_allows_schedule_list_unattended(self):
         hook = _make_unattended_gate_hook(approve_skill_writes=False)
         out = await hook(
             {"tool_name": "mcp__schedule__schedule_list", "tool_input": {}}, "tid", {}
         )
         assert out == {}
+
+    @pytest.mark.asyncio
+    async def test_hook_allows_bash_and_write_when_interactive(self):
+        hook = _make_unattended_gate_hook(approve_skill_writes=True)
+        assert await hook(
+            {"tool_name": "Bash", "tool_input": {"command": "ls"}}, "tid", {}
+        ) == {}
+        assert await hook(
+            {"tool_name": "Write", "tool_input": {"file_path": "prompts/memory.md"}}, "tid", {}
+        ) == {}
 
     @pytest.mark.asyncio
     async def test_hook_allows_mutation_when_interactive(self):
@@ -122,10 +206,6 @@ class TestUnattendedGateHook:
         assert await hook(
             {"tool_name": "mcp__memory__add_memory", "tool_input": {}}, "tid", {}
         ) == {}
-
-    def test_backward_compat_alias(self):
-        # 기존 임포트 이름이 통합 훅을 가리킨다.
-        assert _make_skill_write_guard_hook is _make_unattended_gate_hook
 
 
 # ── _call_claude 배선 (matcher[1] = mutation 매처) ────────────────────
@@ -139,8 +219,9 @@ class TestMutationMatcherWiring:
             await adapter._call_claude("시스템", "질문")  # 무인(승인 없음)
 
         matchers = mock_query.call_args.kwargs["options"].hooks["PreToolUse"]
-        # matcher[0]은 기존 write 게이트 유지, matcher[1]이 mutation 매처.
-        assert matchers[0].matcher == "Write|Edit|MultiEdit|NotebookEdit"
+        # matcher[0]은 Bash+파일-쓰기 게이트, matcher[1]이 mutation 매처.
+        assert matchers[0].matcher == _UNATTENDED_TOOL_MATCHER
+        assert matchers[0].matcher == "Bash|Write|Edit|MultiEdit|NotebookEdit"
         assert matchers[1].matcher == _MUTATION_TOOL_MATCHER
         guard = matchers[1].hooks[0]
         denied = await guard(
@@ -168,6 +249,15 @@ class TestMutationMatcherWiring:
             assert re.match(_MUTATION_TOOL_MATCHER, t), t
         for t in ["mcp__schedule__schedule_list", "mcp__memory__list_memory"]:
             assert re.match(_MUTATION_TOOL_MATCHER, t) is None, t
+
+    def test_unattended_matcher_covers_all_denied_tools(self):
+        import re
+        # 무인 매처가 하드 차단 대상(_UNATTENDED_DENIED_TOOLS = Bash + 파일-쓰기)을 전부 발화 대상으로 건다.
+        for t in _UNATTENDED_DENIED_TOOLS:
+            assert re.fullmatch(_UNATTENDED_TOOL_MATCHER, t), t
+        # 읽기 도구는 이 매처에 걸리지 않는다(과잉 발화 방지).
+        for t in ["Read", "Glob", "Grep", "Skill", "WebSearch"]:
+            assert re.fullmatch(_UNATTENDED_TOOL_MATCHER, t) is None, t
 
 
 class _FakeTyping:
