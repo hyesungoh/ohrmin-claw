@@ -35,6 +35,29 @@ NONE
 대화:
 {conversation}"""
 
+# 학습 루프(C1)용 확장 프롬프트 — 메모리 추출과 재사용 스킬 캡처 제안을 단일 LLM 왕복으로
+# 합친다(M4 이중과금 완화). SKILL_PROPOSAL은 파일을 쓰지 않는 '제안 한 줄'일 뿐이며,
+# 실제 스킬 쓰기는 오너 승인 인터랙티브 경로에서만 일어난다.
+EXTRACTION_PROMPT_WITH_SKILL = """\
+다음 대화에서 장기적으로 기억할 만한 정보를 추출하세요.
+
+카테고리:
+- MEMORY: 환경 사실, 건강 패턴, 운동 습관, 학습 내용 (예: "사용자는 매일 5km 러닝을 함")
+- USER: 사용자 선호도, 소통 스타일, 기대치 (예: "간결한 답변 선호")
+- SKILL_PROPOSAL: 이번 대화에서 여러 도구를 거쳐 수행한 분석 절차가 앞으로 반복 재사용할 가치가 뚜렷하면, 그 절차를 한 줄로 요약 (예: "주간 러닝 강도분포·회복신호 통합 진단 절차"). 재사용 가치가 불확실하면 생략.
+
+형식 (해당 카테고리만 출력):
+MEMORY: [내용]
+USER: [내용]
+SKILL_PROPOSAL: [재사용 절차 한 줄 요약]
+NONE
+
+저장할 내용이 없으면 NONE만 출력하세요.
+이미 알려진 사실이나 일회성 정보는 저장하지 마세요.
+
+대화:
+{conversation}"""
+
 CONSOLIDATION_PROMPT = """\
 메모리 용량이 부족합니다. 기존 엔트리와 새 엔트리를 통합하여 용량 내로 압축하세요.
 
@@ -199,31 +222,56 @@ class MemoryManager:
 
     # ── LLM 연동 ──
 
-    async def extract_and_save(self, llm, conversation: list[dict]) -> None:
-        """LLM으로 대화에서 기억할 정보를 추출하여 저장."""
+    async def extract_and_save(
+        self,
+        llm,
+        conversation: list[dict],
+        propose_skill: bool = False,
+        save_memory: bool = True,
+    ) -> str | None:
+        """대화에서 기억할 정보를 추출/저장하고, propose_skill 시 재사용 스킬 제안을 반환.
+
+        M4(이중과금 완화): auto 메모리 추출과 학습 루프의 스킬 캡처 제안을 단일 LLM 왕복으로
+        합친다. propose_skill=True면 SKILL_PROPOSAL을 함께 요청하는 프롬프트를 쓰고, 응답에서
+        한 줄 제안을 파싱해 반환한다(파일은 쓰지 않음 — 실제 스킬 쓰기는 오너 승인 인터랙티브
+        경로에서만). save_memory=False면 MEMORY/USER를 저장하지 않는다(예: MEMORY_MODE=manual
+        인데 학습 제안만 필요한 경우). 반환값: 스킬 제안 문자열 또는 None.
+        """
         conv_text = "\n".join(
             f"{'사용자' if m['role'] == 'user' else '어시스턴트'}: {m.get('content', '')}"
             for m in conversation
         )
-        prompt = EXTRACTION_PROMPT.format(conversation=conv_text)
+        template = EXTRACTION_PROMPT_WITH_SKILL if propose_skill else EXTRACTION_PROMPT
+        prompt = template.format(conversation=conv_text)
         try:
             response = await llm.ask("메모리 추출기", prompt)
         except Exception:
-            return
+            return None
 
         if not response or response.strip() == "NONE":
-            return
+            return None
 
+        proposal = None
         for line in response.strip().split("\n"):
             line = line.strip()
-            if line.startswith("MEMORY:"):
+            if save_memory and line.startswith("MEMORY:"):
                 entry = line[len("MEMORY:"):].strip()
                 if entry:
                     await self._save_or_consolidate(llm, "memory", entry)
-            elif line.startswith("USER:"):
+            elif save_memory and line.startswith("USER:"):
                 entry = line[len("USER:"):].strip()
                 if entry:
                     await self._save_or_consolidate(llm, "user", entry)
+            elif propose_skill and line.startswith("SKILL_PROPOSAL:"):
+                candidate = line[len("SKILL_PROPOSAL:"):].strip()
+                # 인젝션 방어: 시스템 지시처럼 보이는 제안은 표면화하지 않는다(_INJECTION_PATTERNS 재사용).
+                if (
+                    candidate
+                    and candidate.upper() != "NONE"
+                    and not _INJECTION_PATTERNS.search(candidate)
+                ):
+                    proposal = candidate
+        return proposal
 
     async def _save_or_consolidate(self, llm, target: str, entry: str) -> dict:
         """추가 시도 → 실패 시 LLM으로 통합. 결과를 dict로 리턴."""

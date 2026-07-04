@@ -1,7 +1,64 @@
 """Garmin Connect 데이터 접근 레이어 — python-garminconnect 기반."""
 import datetime
+import functools
 
-from garminconnect import Garmin
+from garminconnect import (
+    Garmin,
+    GarminConnectAuthenticationError,
+    GarminConnectTooManyRequestsError,
+)
+
+
+class GarminDataError(Exception):
+    """사용자에게 안전하게 노출 가능한 Garmin 오류 (provider 내부/트레이스 미노출)."""
+
+
+class GarminAuthError(GarminDataError):
+    """인증 실패 (401)."""
+
+
+class GarminRateLimitError(GarminDataError):
+    """요청 과다 (429) — sync.sh가 최근 3일만 동기화하는 이유이기도 하다."""
+
+
+_RATE_LIMIT_MSG = "가민 서버 요청이 많아 잠시 후 다시 시도해야 해요 (429)."
+_AUTH_MSG = "가민 인증에 문제가 생겼어요. 로그인 정보를 확인해주세요 (401)."
+
+
+def _http_status(exc) -> int | None:
+    """예외에서 HTTP 상태코드를 best-effort로 추출 (requests/garth HTTPError 계열)."""
+    resp = getattr(exc, "response", None)
+    return getattr(resp, "status_code", None)
+
+
+def _translate_garmin_errors(fn):
+    """401/429를 안전한 타입드 오류로 번역하는 데코레이터.
+
+    원 예외는 서버 로그에만 남기고(디버깅), 모델/사용자에게는 provider 내부가 없는
+    한국어 메시지만 노출한다. 그 외 상태코드/예외는 원형 그대로 전파.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except GarminDataError:
+            raise  # 이미 번역됨 (중첩 호출 이중 번역 방지)
+        except GarminConnectTooManyRequestsError as e:
+            print(f"⚠️ Garmin 429: {e}")
+            raise GarminRateLimitError(_RATE_LIMIT_MSG) from None
+        except GarminConnectAuthenticationError as e:
+            print(f"⚠️ Garmin 401: {e}")
+            raise GarminAuthError(_AUTH_MSG) from None
+        except Exception as e:
+            status = _http_status(e)
+            if status == 429:
+                print(f"⚠️ Garmin 429: {e}")
+                raise GarminRateLimitError(_RATE_LIMIT_MSG) from None
+            if status == 401:
+                print(f"⚠️ Garmin 401: {e}")
+                raise GarminAuthError(_AUTH_MSG) from None
+            raise
+    return wrapper
 
 
 def _speed_to_pace(speed_mps: float | None) -> str | None:
@@ -69,6 +126,7 @@ class GarminConnectClient:
         self.api = Garmin(email=email, password=password, is_cn=is_cn)
         self.api.login(tokenstore=token_dir)
 
+    @_translate_garmin_errors
     def get_sleep(self, start: datetime.date, end: datetime.date) -> list[dict]:
         results = []
         for day in _date_range(start, end):
@@ -99,6 +157,7 @@ class GarminConnectClient:
             })
         return results
 
+    @_translate_garmin_errors
     def get_daily_summary(self, start: datetime.date, end: datetime.date) -> list[dict]:
         results = []
         for day in _date_range(start, end):
@@ -118,6 +177,7 @@ class GarminConnectClient:
             })
         return results
 
+    @_translate_garmin_errors
     def get_hrv(self, start: datetime.date, end: datetime.date) -> list[dict]:
         results = []
         for day in _date_range(start, end):
@@ -136,6 +196,7 @@ class GarminConnectClient:
             })
         return results
 
+    @_translate_garmin_errors
     def get_activities(self, start: datetime.date, end: datetime.date) -> list[dict]:
         raw_list = self.api.get_activities_by_date(
             start.isoformat(), end.isoformat(),
@@ -167,6 +228,7 @@ class GarminConnectClient:
             })
         return results
 
+    @_translate_garmin_errors
     def get_stress(self, start: datetime.date, end: datetime.date) -> list[dict]:
         results = []
         for day in _date_range(start, end):
@@ -181,6 +243,7 @@ class GarminConnectClient:
 
     # ── 상세 활동 메서드 ──────────────────────────────
 
+    @_translate_garmin_errors
     def get_activity_splits(self, activity_id: str) -> list[dict]:
         raw = self.api.get_activity_splits(activity_id)
         laps = raw.get("lapDTOs", [])
@@ -199,6 +262,7 @@ class GarminConnectClient:
             for i, lap in enumerate(laps)
         ]
 
+    @_translate_garmin_errors
     def get_activity_hr_zones(self, activity_id: str) -> list[dict]:
         raw = self.api.get_activity_hr_in_timezones(activity_id)
         if not raw:
@@ -214,6 +278,7 @@ class GarminConnectClient:
             for z in raw
         ]
 
+    @_translate_garmin_errors
     def get_exercise_sets(self, activity_id: str) -> list[dict]:
         """웨이트 트레이닝 세트 조회 (REST 세트 제외)."""
         raw = self.api.get_activity_exercise_sets(activity_id)
@@ -235,6 +300,7 @@ class GarminConnectClient:
     SWIMMING_SPORTS = {"lap_swimming", "open_water_swimming"}
     HIKING_CYCLING_SPORTS = {"hiking", "cycling", "mountain_biking", "road_biking"}
 
+    @_translate_garmin_errors
     def get_activity_detail(self, activity_id: str) -> dict:
         """종목 자동 감지 후 종목별 상세 데이터 통합 조회."""
         act = self.api.get_activity(activity_id)
@@ -295,6 +361,7 @@ class GarminConnectClient:
             "calories": raw.get("calories", 0),
         }
 
+    @_translate_garmin_errors
     def get_last_activity(self, count: int = 1) -> dict | list[dict]:
         """최근 활동 조회. count=1이면 단일 dict, count>1이면 list."""
         if count == 1:

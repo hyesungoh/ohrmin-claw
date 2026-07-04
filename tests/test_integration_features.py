@@ -123,6 +123,7 @@ class TestSessionTimeout:
             mock_sess.is_expired.return_value = True  # 만료!
             mock_comp.compress = AsyncMock(return_value=[])
             mock_llm.ask_with_context = capture_ask
+            mock_llm.end_session = AsyncMock()  # 만료 시 stateful 클라이언트 정리(Phase D)
 
             await handle_health_query(mock_message, "현재 질문")
 
