@@ -463,6 +463,19 @@ class TestClaudeAgentOptionsExtended:
             assert "Skill" in options.allowed_tools
 
     @pytest.mark.asyncio
+    async def test_allowed_tools_includes_web_tools(self):
+        """A1: cwd 활성 시 조립된 allowed_tools에 WebSearch/WebFetch가 포함되어야 함."""
+        adapter = ClaudeSDKAdapter(cwd="/path/to/project")
+
+        with patch("core.llm.query") as mock_query:
+            mock_query.return_value = mock_async_gen([])
+            await adapter._call_claude("system", "test")
+            call_args = mock_query.call_args
+            options = call_args.kwargs.get("options") or call_args[1].get("options")
+            assert "WebSearch" in options.allowed_tools
+            assert "WebFetch" in options.allowed_tools
+
+    @pytest.mark.asyncio
     async def test_no_cwd_by_default(self):
         adapter = ClaudeSDKAdapter()
 
