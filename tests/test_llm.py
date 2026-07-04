@@ -190,7 +190,7 @@ class TestAskWithContextHistory:
         ]
         called_with_message = None
 
-        async def capture_call(system_prompt, user_message, on_text=None):
+        async def capture_call(system_prompt, user_message, on_text=None, **kwargs):
             nonlocal called_with_message
             called_with_message = user_message
             return "후속 응답"
@@ -213,7 +213,7 @@ class TestAskWithContextHistory:
         adapter = ClaudeSDKAdapter()
         called_with_message = None
 
-        async def capture_call(system_prompt, user_message, on_text=None):
+        async def capture_call(system_prompt, user_message, on_text=None, **kwargs):
             nonlocal called_with_message
             called_with_message = user_message
             return "응답"
@@ -235,7 +235,7 @@ class TestAskWithContextHistory:
         adapter = ClaudeSDKAdapter()
         called_with_message = None
 
-        async def capture_call(system_prompt, user_message, on_text=None):
+        async def capture_call(system_prompt, user_message, on_text=None, **kwargs):
             nonlocal called_with_message
             called_with_message = user_message
             return "응답"
@@ -331,7 +331,7 @@ class TestStreamingCallback:
 
         original_call = adapter._call_claude
 
-        async def capture_call(system_prompt, user_message, on_text=None):
+        async def capture_call(system_prompt, user_message, on_text=None, **kwargs):
             nonlocal received_on_text
             received_on_text = on_text
             return "응답"

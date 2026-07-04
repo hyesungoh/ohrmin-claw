@@ -373,30 +373,102 @@ def _format_sleep_briefing(sleep_data: dict) -> str:
     return ", ".join(parts)
 
 
+async def run_agent_turn(
+    system: str,
+    message: str,
+    context: dict,
+    on_text,
+    on_tool=None,
+    history: list[dict] | None = None,
+    max_turns: int = 15,
+    approve_skill_writes: bool | None = None,
+    allowed_tools: list[str] | None = None,
+) -> str:
+    """순수 생성 primitive — 이미 수집된 context를 인자로 받아 LLM 생성만 수행.
+
+    context를 호출자에게서 수령하므로 Garmin/체성분을 재수집하지 않는다(이중 조회 방지).
+    스레드/채널 오케스트레이션은 run_agent_to_channel 또는 handle_health_query가 담당.
+    """
+    return await llm.ask_with_context(
+        system,
+        message,
+        context,
+        history=history,
+        on_text=on_text,
+        on_tool=on_tool,
+        max_turns=max_turns,
+        approve_skill_writes=approve_skill_writes,
+        allowed_tools=allowed_tools,
+    )
+
+
+async def run_agent_to_channel(
+    prompt: str,
+    channel_id,
+    thread_name: str,
+    *,
+    system: str | None = None,
+    context: dict | None = None,
+    on_tool=None,
+    max_turns: int = 15,
+    approve_skill_writes: bool | None = None,
+    allowed_tools: list[str] | None = None,
+):
+    """지정 채널에 스레드를 만들고 run_agent_turn 응답을 스트리밍 게시하는 오케스트레이션.
+
+    system/context를 넘기지 않으면 여기서 조립·수집한다. 이미 수집한 호출자(자동 분석)는
+    context를 넘겨 이중 조회를 막는다. 무인 초기자(cron/자동 분석)는 approve_skill_writes를
+    넘기지 않으므로 skill-write 안전 게이트가 유지된다.
+    """
+    if not channel_id:
+        print("⚠️ channel_id 미설정 — run_agent_to_channel 건너뜀")
+        return None
+
+    try:
+        notify_channel = await channel._client.fetch_channel(int(channel_id))
+    except Exception as e:
+        print(f"⚠️ 알림 채널 조회 실패: {e}")
+        return None
+
+    thread = await notify_channel.create_thread(
+        name=thread_name,
+        type=discord.ChannelType.public_thread,
+    )
+    session_mgr.update_activity(thread.id)
+
+    if system is None:
+        system = _build_system_prompt()
+    if context is None:
+        context = await _collect_health_context_async()
+
+    async def on_text(text: str):
+        await send_reply(thread, text)
+
+    async with thread.typing():
+        await run_agent_turn(
+            system,
+            prompt,
+            context,
+            on_text,
+            on_tool=on_tool,
+            max_turns=max_turns,
+            approve_skill_writes=approve_skill_writes,
+            allowed_tools=allowed_tools,
+        )
+    return thread
+
+
 async def _run_auto_analysis(new_rows: list[dict]):
     """새 체성분 데이터 감지 시 채널에 스레드 생성 + Claude 분석 전송."""
     if not NOTIFY_CHANNEL_ID:
         print("⚠️ NOTIFY_CHANNEL_ID 미설정 — 자동 분석 건너뜀")
         return
 
-    try:
-        notify_channel = await channel._client.fetch_channel(int(NOTIFY_CHANNEL_ID))
-    except Exception as e:
-        print(f"⚠️ 알림 채널 조회 실패: {e}")
-        return
-
     latest_date = new_rows[-1]["date"]
-    thread = await notify_channel.create_thread(
-        name=f"체성분 자동 분석 — {latest_date}",
-        type=discord.ChannelType.public_thread,
-    )
-    session_mgr.update_activity(thread.id)
-
     summary = _format_new_data_summary(new_rows)
-    full_system = _build_system_prompt()
     context = await _collect_health_context_async()
 
-    # 어젯밤 수면 브리핑 추가
+    # 어젯밤 수면 브리핑 추가 (context는 run_agent_to_channel에 재전달 → 이중 조회 방지)
     sleep_briefing = _format_sleep_briefing(context.get("sleep", {}))
 
     user_message = (
@@ -406,11 +478,13 @@ async def _run_auto_analysis(new_rows: list[dict]):
         f"체성분 트렌드와 수면 효율을 종합적으로 분석해주세요."
     )
 
-    async def on_text(text: str):
-        await send_reply(thread, text)
-
-    async with thread.typing():
-        await llm.ask_with_context(full_system, user_message, context, on_text=on_text)
+    # 무인 초기자 — approve_skill_writes 미전달(= skill-write 차단 유지).
+    await run_agent_to_channel(
+        user_message,
+        NOTIFY_CHANNEL_ID,
+        f"체성분 자동 분석 — {latest_date}",
+        context=context,
+    )
 
 
 @tasks.loop(minutes=2)
