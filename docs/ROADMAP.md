@@ -2,6 +2,8 @@
 
 > Nous Research **Hermes Agent** 프레임워크와의 심층 비교를 기반으로, ohrmin-claw의 **워크플로우 아키텍처를 어느 방향으로 진화시킬지** 정리한 문서. `docs/ARCHITECTURE.md`가 "지금 어떻게 생겼나"라면, 이 문서는 "앞으로 어디로 갈까"다. 특정 대화 세션의 단편적 버그 수정이 아니라 **시스템 수준의 도약**에 초점을 둔다.
 
+> **구현 상태 (2026-07-04):** 5개 축 전부 `feat/hermes-roadmap` 브랜치에 구현·테스트 완료(517 tests green). 실행 계획은 `.omc/plans/roadmap-execution-plan.md`. 축1(cron 스케줄러)·축2(웹 도구)·축3(FTS5 `core/session_index.py`)·축4(학습 루프 `core/learning.py`)·축5(steer + tool-status) 모두 반영. 무인 턴 = 읽기 전용 안전 게이트(PreToolUse 훅)로 자율 실행 시 skill/메모리/스케줄 무단 변경 차단. 남은 follow-up: 라이브 E2E 스모크(훅·steer), 축3 digest 모드, persistent 클라이언트 history-fold 최적화.
+
 ---
 
 ## 0. 배경 — 왜 Hermes를 봤나
