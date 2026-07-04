@@ -42,8 +42,10 @@ core/           추상화 레이어 + 데이터 접근
   memory.py        영구 메모리 관리 (prompts/memory.md + prompts/user.md, Hermes식)
   context_compressor.py  대화 이력 압축 (보호 구간 + LLM 요약)
   session_manager.py     세션 타임아웃 관리 (idle 24시간 기본)
+  scheduler.py     NL cron 스케줄러 (의존성 없는 5필드 cron 매처 + 상대 one-shot + 원자적 JSON 스토어)
+  schedule_tools.py  Schedule MCP tool 정의 (schedule_create/list/pause/resume/remove)
 
-bot/main.py     Discord 봇 엔트리포인트 (스레드 기반 대화 세션)
+bot/main.py     Discord 봇 엔트리포인트 (스레드 기반 대화 세션 + cron_tick_loop)
 prompts/        시스템 프롬프트 (system.md) + 개인 목표 (goals.md) + 메모리 (memory.md, user.md)
 .claude/skills/ 전문 분석 스킬 파일 (운동평가, 수면분석, 체성분, 과학기준)
 ```
@@ -61,6 +63,8 @@ prompts/        시스템 프롬프트 (system.md) + 개인 목표 (goals.md) + 
 - **컨텍스트 압축**: 대화 이력이 20개 초과 시 중간 구간을 LLM으로 요약. 첫 메시지(1개) + 최근 메시지(6개)는 원본 보호. Hermes 방식.
 - **세션 타임아웃**: 스레드 idle 24시간(기본) 초과 시 히스토리 미로드하여 새 세션 취급. `SESSION_IDLE_TIMEOUT` 환경변수로 조정 가능.
 - **유저 화이트리스트**: `ALLOWED_USERS` 환경변수(쉼표 구분 Discord User ID)에 등록된 사용자만 응답. 빈 값이면 모든 메시지 무시 (안전 기본값).
+- **NL cron 스케줄러**: LLM이 자연어 예약 요청을 5필드 cron으로 변환해 `schedule_create` 호출 → `data/cron_jobs.json`에 원자적 영속. `@tasks.loop(minutes=1) cron_tick_loop`가 due 잡을 `run_agent_to_channel`로 실행 (per-job try/except로 실패 격리, 상대 one-shot은 발화 후 자기 삭제). `SCHEDULER_ENABLED`로 게이팅. 무인 초기자는 축소 도구셋(`UNATTENDED_ALLOWED_TOOLS`, schedule_list만)으로 mutation 제외.
+- **Garmin 429 완화**: `_collect_health_context_async`에 공유 세마포어(동시 1) + 단기 TTL 캐시를 두어 겹치는 초기자(on_message·cron_tick·2분 루프)의 동시 Garmin 버스트를 직렬화·중복 제거. 새 데이터 도착 시 `_invalidate_context_cache`로 강제 재수집.
 
 ## Data Sources
 
@@ -83,6 +87,9 @@ prompts/        시스템 프롬프트 (system.md) + 개인 목표 (goals.md) + 
 - `MEMORY_MODE` — `auto` (기본, 대화 후 자동 추출) | `manual` (명시적 요청 시만)
 - `SESSION_IDLE_TIMEOUT` — 세션 idle 타임아웃 분 (기본: `1440` = 24시간)
 - `NOTIFY_CHANNEL_ID` — 자동 분석 결과 전송 Discord 채널 ID (미설정 시 자동 분석 비활성화)
+- `SCHEDULER_ENABLED` — cron 스케줄러 kill-switch (`1`/`true` 시 활성, 기본 비활성)
+- `MAX_CRON_JOBS` — 등록 가능한 cron 잡 상한 (기본 `50`, 초과 생성 거부)
+- `HEALTH_CONTEXT_TTL` — Garmin 컨텍스트 캐시 TTL 초 (기본 `90`, 겹치는 초기자 429 완화)
 - `APPLE_HEALTH_EXPORT_DIR` — iCloud Drive 내 Health Auto Export 폴더 경로 (기본값: `~/Library/Mobile Documents/iCloud~com~ifunography~HealthExport/Documents/daily inbody`)
 - Claude CLI 로그인 필요: `claude login`
 
