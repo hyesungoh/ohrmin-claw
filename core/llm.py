@@ -16,6 +16,9 @@ DEFAULT_ALLOWED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill
 # skill-write 게이트가 감시하는 파일 쓰기 도구. matcher 문자열과 정렬 유지.
 _WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 
+# 생성 실패 시 원시 트레이스 대신 전달하는 한국어 폴백.
+_CLAUDE_FALLBACK_MESSAGE = "지금 데이터를 못 불러왔어요, 잠시 후 다시 시도할게요."
+
 
 def _skill_path_segments(file_path: str) -> list[str]:
     """파일 경로를 정규화해 세그먼트 리스트로 반환 (절대/상대/`..` 무관)."""
@@ -196,13 +199,20 @@ class ClaudeSDKAdapter(LLMAdapter):
                     )
                 ]
             }
-        msg_aiter = query(
-            prompt=user_message,
-            options=ClaudeAgentOptions(**options_kwargs),
-        )
-        result_texts = await self._consume_stream(
-            msg_aiter, on_text=on_text, on_tool=on_tool, counter=counter
-        )
+        try:
+            msg_aiter = query(
+                prompt=user_message,
+                options=ClaudeAgentOptions(**options_kwargs),
+            )
+            result_texts = await self._consume_stream(
+                msg_aiter, on_text=on_text, on_tool=on_tool, counter=counter
+            )
+        except Exception as e:
+            # 원시 예외/트레이스 대신 한국어 폴백을 스트림·반환에 전달 (provider 내부 미노출).
+            print(f"⚠️ Claude 생성 실패: {type(e).__name__}: {e}")
+            if on_text:
+                await on_text(_CLAUDE_FALLBACK_MESSAGE)
+            return _CLAUDE_FALLBACK_MESSAGE
         return "\n".join(result_texts) if result_texts else ""
 
     async def ask(
