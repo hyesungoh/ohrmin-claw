@@ -197,6 +197,51 @@ async def _index_turn_message(thread_id, ts, role, content, turn_id=None):
         print(f"⚠️ 세션 인덱스 색인 실패: {e}")
 
 
+def map_tool_status(name: str) -> str:
+    """도구 이름을 사용자용 한국어 상태 문구로 매핑."""
+    if name.startswith("mcp__garmin__"):
+        return "💻 Garmin 조회 중…"
+    if name in ("WebSearch", "WebFetch"):
+        return "🔍 검색 중…"
+    if name.startswith("mcp__body_metrics__"):
+        return "📊 체성분 확인 중…"
+    if name.startswith("mcp__session_search__"):
+        return "🔎 과거 기록 검색 중…"
+    if name == "Skill":
+        return "🧠 분석 중…"
+    return "⚙️ 작업 중…"
+
+
+class ToolStatusLine:
+    """단일 transient 상태 메시지를 생성/편집/정리하는 도구 상태 피드.
+
+    on_tool 호출마다 상태를 갱신(첫 도구=생성, 이후=편집)하고 턴 종료 시 정리한다.
+    멀티툴 턴은 text↔tool을 오가므로 '첫 텍스트에 제거'하지 않고 전이별 편집 + 종료 정리한다.
+    """
+
+    def __init__(self, target):
+        self._target = target
+        self._msg = None
+
+    async def update(self, name: str):
+        label = map_tool_status(name)
+        if self._msg is None:
+            self._msg = await self._target.send(label)
+        else:
+            try:
+                await self._msg.edit(content=label)
+            except discord.HTTPException:
+                pass
+
+    async def clear(self):
+        if self._msg is not None:
+            try:
+                await self._msg.delete()
+            except discord.HTTPException:
+                pass
+            self._msg = None
+
+
 def _collect_health_context() -> dict:
     """건강 데이터 컨텍스트를 수집."""
     context = {}
@@ -305,12 +350,16 @@ async def handle_health_query(message: discord.Message, content: str, image_path
     async def on_text(text: str):
         await send_reply(target, text)
 
+    status = ToolStatusLine(target)
+
     async with target.typing():
         reply_text = await llm.ask_with_context(
             full_system, content, context,
             history=history,
             on_text=on_text,
+            on_tool=status.update,
         )
+    await status.clear()
 
     # 봇 답변은 턴 반환값에서 1회 색인 (청크 send_reply 아님 → 파편화 방지).
     if reply_text:
