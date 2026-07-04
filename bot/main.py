@@ -424,11 +424,15 @@ async def handle_health_query(message: discord.Message, content: str, image_path
     status = ToolStatusLine(target)
 
     async with target.typing():
+        # 인터랙티브 오너 턴 = 특권 턴. approve_skill_writes=True로 skill-write + schedule/memory
+        # mutation을 허용한다(무인 턴은 미전달 → PreToolUse 게이트가 하드 차단). 화이트리스트를
+        # 통과한 오너만 이 경로에 도달한다(on_message).
         reply_text = await llm.ask_with_context(
             full_system, content, context,
             history=history,
             on_text=on_text,
             on_tool=status.update,
+            approve_skill_writes=True,
         )
     await status.clear()
 

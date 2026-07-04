@@ -62,17 +62,63 @@ def evaluate_skill_write_gate(
     return True, ""
 
 
-def _make_skill_write_guard_hook(approve_skill_writes: bool) -> Callable:
-    """evaluate_skill_write_gate를 감싸는 PreToolUse 훅 콜백을 만든다.
+# 무인 턴에서 하드 차단할 MCP mutation 도구 — 인터랙티브 오너 승인 시에만 허용.
+# schedule_list·list_memory 등 조회/읽기 도구는 이 집합에 없으므로 언제나 허용된다.
+_MUTATION_MCP_TOOLS = {
+    "mcp__schedule__schedule_create",
+    "mcp__schedule__schedule_pause",
+    "mcp__schedule__schedule_resume",
+    "mcp__schedule__schedule_remove",
+    "mcp__memory__add_memory",
+    "mcp__memory__replace_memory",
+    "mcp__memory__remove_memory",
+}
+
+# PreToolUse 매처(정규식) — 위 mutation 도구에 훅을 발화시킨다. list/read 도구명은 매칭되지 않는다.
+# 게이트 함수가 최종 판정을 하므로 매처가 다소 넓게 걸려도 안전하다.
+_MUTATION_TOOL_MATCHER = (
+    r"mcp__schedule__schedule_(create|pause|resume|remove)"
+    r"|mcp__memory__(add_memory|replace_memory|remove_memory)"
+)
+
+
+def evaluate_tool_gate(
+    tool_name: str,
+    tool_input: dict | None,
+    approve_privileged: bool = False,
+) -> tuple[bool, str]:
+    """통합 무인-권한 게이트 — 특권 작업을 인터랙티브 승인 턴에서만 허용.
+
+    approve_privileged(= 인터랙티브 오너 턴의 approve_skill_writes True)일 때만 허용:
+    - `.claude/skills/**` 쓰기 (science-reference는 승인해도 무조건 차단).
+    - schedule/memory mutation MCP 도구(create/pause/resume/remove, add/replace/remove_memory).
+
+    무인 턴(승인 없음)에서는 위 작업을 하드 차단(permissionDecision: deny)한다. schedule_list·
+    list_memory·읽기 도구는 언제나 허용. `permission_mode="bypassPermissions"` 하에서도
+    PreToolUse 훅은 발화하므로 이 게이트가 구조적 강제선이다(allowed_tools 스티어링보다 강함).
+    """
+    # 1) 스킬 파일 쓰기 게이트(기존 로직 재사용).
+    allow, reason = evaluate_skill_write_gate(tool_name, tool_input, approve_privileged)
+    if not allow:
+        return allow, reason
+    # 2) schedule/memory mutation — 무인 턴 하드 차단.
+    if tool_name in _MUTATION_MCP_TOOLS and not approve_privileged:
+        return False, f"{tool_name}는 인터랙티브 오너 세션 승인이 필요합니다 (무인 턴 차단)."
+    return True, ""
+
+
+def _make_unattended_gate_hook(approve_skill_writes: bool) -> Callable:
+    """evaluate_tool_gate를 감싸는 PreToolUse 훅 콜백을 만든다 (통합 무인-권한 게이트).
 
     can_use_tool 콜백은 streaming(AsyncIterable) prompt를 요구하지만 이 어댑터는 문자열 prompt
     경로를 쓴다 (SDK가 문자열 prompt + can_use_tool 조합에 ValueError). PreToolUse 훅은 문자열
     prompt에서도 컨트롤 프로토콜로 발화하며 bypassPermissions는 권한 프롬프트만 우회할 뿐
-    훅 발화를 막지 않으므로, 게이트는 훅으로 강제한다.
+    훅 발화를 막지 않으므로, 게이트는 훅으로 강제한다. approve_skill_writes는 "인터랙티브 특권
+    턴" 신호로 재사용된다(skill-write + schedule/memory mutation을 함께 게이팅).
     """
     async def _guard(input_data, tool_use_id, context):
         input_data = input_data or {}
-        allow, reason = evaluate_skill_write_gate(
+        allow, reason = evaluate_tool_gate(
             input_data.get("tool_name", ""),
             input_data.get("tool_input", {}),
             approve_skill_writes,
@@ -88,6 +134,10 @@ def _make_skill_write_guard_hook(approve_skill_writes: bool) -> Callable:
         }
 
     return _guard
+
+
+# 하위 호환 별칭 — 기존 임포트/테스트(_make_skill_write_guard_hook)를 유지.
+_make_skill_write_guard_hook = _make_unattended_gate_hook
 
 
 class LLMAdapter(ABC):
@@ -190,13 +240,19 @@ class ClaudeSDKAdapter(LLMAdapter):
                 DEFAULT_ALLOWED_TOOLS if allowed_tools is None else allowed_tools
             )
             options_kwargs["permission_mode"] = "bypassPermissions"
-            # skill-write 안전 게이트 — bypassPermissions 하에서도 PreToolUse 훅은 발화한다.
+            # 통합 무인-권한 게이트 — bypassPermissions 하에서도 PreToolUse 훅은 발화한다.
+            # matcher[0]: skill-write 도구(Write/Edit/...). matcher[1]: schedule/memory mutation
+            # MCP 도구. 무인 턴(approve False)은 둘 다 하드 차단, 인터랙티브 승인 턴은 허용.
             options_kwargs["hooks"] = {
                 "PreToolUse": [
                     HookMatcher(
                         matcher="Write|Edit|MultiEdit|NotebookEdit",
-                        hooks=[_make_skill_write_guard_hook(approve)],
-                    )
+                        hooks=[_make_unattended_gate_hook(approve)],
+                    ),
+                    HookMatcher(
+                        matcher=_MUTATION_TOOL_MATCHER,
+                        hooks=[_make_unattended_gate_hook(approve)],
+                    ),
                 ]
             }
         try:
