@@ -23,6 +23,10 @@ bash scripts/setup.sh
 
 ## Architecture
 
+> **전체 아키텍처 심화 문서: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — 요청 라이프사이클, 데이터 파이프라인, MCP 도구 카탈로그, 부트 시퀀스·배선, 게처를 file:line 근거와 함께 정리. 시스템을 깊이 이해하거나 변경하기 전에 먼저 참조할 것. 아래는 요약 맵.
+>
+> **시스템 진화 로드맵: [`docs/ROADMAP.md`](docs/ROADMAP.md)** — Hermes Agent 비교 기반 5축 진화 방향(선제 스케줄러 · 웹 도구 · FTS5 장기기억 · 학습 루프 · 조종 가능 루프)과 성숙도 시퀀스. 새 기능을 설계할 때 참조.
+
 ```
 core/           추상화 레이어 + 데이터 접근
   llm.py          LLMAdapter ABC → ClaudeSDKAdapter (claude-agent-sdk, 구독 모델, MCP 서버 + cwd/skills 지원)
