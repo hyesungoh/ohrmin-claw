@@ -4,7 +4,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
-from claude_agent_sdk import query, ClaudeAgentOptions, HookMatcher
+from claude_agent_sdk import query, ClaudeSDKClient, ClaudeAgentOptions, HookMatcher
 from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
 
 
@@ -179,6 +179,10 @@ class ClaudeSDKAdapter(LLMAdapter):
         # 어댑터 인스턴스는 전 초기자가 공유하므로 이 값은 기본값일 뿐이다.
         # 인터랙티브 오너 턴은 호출 시 approve_skill_writes=True를 넘겨 세션 승인한다.
         self.approve_skill_writes = approve_skill_writes
+        # 인터랙티브 스레드 전용 stateful 클라이언트 풀 (thread_id → ClaudeSDKClient).
+        # steer(interrupt-then-restart)를 위해 스레드별 단일 클라이언트를 재사용한다.
+        # 무인 초기자(cron·자동분석)는 여기 등록하지 않고 one-shot query() 경로를 유지한다.
+        self._clients: dict = {}
 
     async def _consume_stream(
         self,
@@ -212,17 +216,19 @@ class ClaudeSDKAdapter(LLMAdapter):
                             counter[0] += 1
         return result_texts
 
-    async def _call_claude(
+    def _build_options(
         self,
         system_prompt: str,
-        user_message: str,
-        on_text: Callable | None = None,
-        on_tool: Callable | None = None,
-        counter: list | None = None,
         max_turns: int = 15,
         approve_skill_writes: bool | None = None,
         allowed_tools: list[str] | None = None,
-    ) -> str:
+    ) -> ClaudeAgentOptions:
+        """ClaudeAgentOptions를 조립 — one-shot query()와 persistent 클라이언트가 공유한다.
+
+        cwd 활성 시 setting_sources/allowed_tools/permission_mode + PreToolUse 안전 게이트
+        훅을 배선한다. 이 게이트는 persistent 클라이언트에도 그대로 실려야 하므로(무인/권한
+        불변식 유지) 옵션 조립을 여기로 단일화한다.
+        """
         options_kwargs = {
             "system_prompt": system_prompt,
             "model": self.model,
@@ -255,11 +261,24 @@ class ClaudeSDKAdapter(LLMAdapter):
                     ),
                 ]
             }
+        return ClaudeAgentOptions(**options_kwargs)
+
+    async def _call_claude(
+        self,
+        system_prompt: str,
+        user_message: str,
+        on_text: Callable | None = None,
+        on_tool: Callable | None = None,
+        counter: list | None = None,
+        max_turns: int = 15,
+        approve_skill_writes: bool | None = None,
+        allowed_tools: list[str] | None = None,
+    ) -> str:
+        options = self._build_options(
+            system_prompt, max_turns, approve_skill_writes, allowed_tools
+        )
         try:
-            msg_aiter = query(
-                prompt=user_message,
-                options=ClaudeAgentOptions(**options_kwargs),
-            )
+            msg_aiter = query(prompt=user_message, options=options)
             result_texts = await self._consume_stream(
                 msg_aiter, on_text=on_text, on_tool=on_tool, counter=counter
             )
@@ -270,6 +289,77 @@ class ClaudeSDKAdapter(LLMAdapter):
                 await on_text(_CLAUDE_FALLBACK_MESSAGE)
             return _CLAUDE_FALLBACK_MESSAGE
         return "\n".join(result_texts) if result_texts else ""
+
+    async def _get_or_create_client(
+        self, thread_id, options: ClaudeAgentOptions
+    ) -> ClaudeSDKClient:
+        """스레드별 stateful 클라이언트를 반환 (없으면 connect 후 등록).
+
+        최초 인터랙티브 턴에 생성되어 후속 턴에 재사용된다. 재사용 시 options는 최초 connect
+        시점 값이 유지된다(stateful 세션이므로 system_prompt 등은 턴마다 갱신되지 않음 — 세션
+        만료/재생성 시 새 프롬프트로 다시 조립된다).
+        """
+        client = self._clients.get(thread_id)
+        if client is None:
+            client = ClaudeSDKClient(options=options)
+            await client.connect()
+            self._clients[thread_id] = client
+        return client
+
+    async def _call_claude_persistent(
+        self,
+        thread_id,
+        system_prompt: str,
+        user_message: str,
+        on_text: Callable | None = None,
+        on_tool: Callable | None = None,
+        counter: list | None = None,
+        max_turns: int = 15,
+        approve_skill_writes: bool | None = None,
+        allowed_tools: list[str] | None = None,
+    ) -> str:
+        """인터랙티브 스레드용 persistent 클라이언트 경로 — one-shot query()의 producer 교체.
+
+        _consume_stream을 그대로 재사용(계약 불변): query() 대신 client.receive_response()를
+        컨슈머에 먹인다. interrupt는 receive_response를 ResultMessage로 종료시켜 남은 블록을
+        더 발화하지 않으므로, 재시작(새 프롬프트) 시 인터리브 없이 새 스트림만 흐른다.
+        """
+        options = self._build_options(
+            system_prompt, max_turns, approve_skill_writes, allowed_tools
+        )
+        try:
+            client = await self._get_or_create_client(thread_id, options)
+            await client.query(user_message)
+            result_texts = await self._consume_stream(
+                client.receive_response(), on_text=on_text, on_tool=on_tool, counter=counter
+            )
+        except Exception as e:
+            # 깨진 클라이언트는 폐기 → 다음 턴에 새로 생성. 폴백을 스트림·반환에 전달.
+            print(f"⚠️ Claude 생성 실패(persistent): {type(e).__name__}: {e}")
+            await self.end_session(thread_id)
+            if on_text:
+                await on_text(_CLAUDE_FALLBACK_MESSAGE)
+            return _CLAUDE_FALLBACK_MESSAGE
+        return "\n".join(result_texts) if result_texts else ""
+
+    async def interrupt_session(self, thread_id) -> None:
+        """진행 중인 스레드 턴에 interrupt 신호를 보낸다 (재시작 준비). 클라이언트 없으면 no-op."""
+        client = self._clients.get(thread_id)
+        if client is not None:
+            await client.interrupt()
+
+    async def end_session(self, thread_id) -> None:
+        """스레드 세션 종료 — 클라이언트 disconnect + 풀에서 제거 (누수 방지, 멱등)."""
+        client = self._clients.pop(thread_id, None)
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception as e:
+                print(f"⚠️ 세션 클라이언트 정리 실패(thread={thread_id}): {type(e).__name__}: {e}")
+
+    def has_session(self, thread_id) -> bool:
+        """스레드에 활성 persistent 클라이언트가 있는지."""
+        return thread_id in self._clients
 
     async def ask(
         self,
@@ -293,6 +383,25 @@ class ClaudeSDKAdapter(LLMAdapter):
             allowed_tools=allowed_tools,
         )
 
+    def _augment_message(
+        self, user_message: str, context: dict, history: list[dict] | None = None
+    ) -> str:
+        """대화 이력 + 데이터 컨텍스트 + 질문을 하나의 프롬프트로 조립.
+
+        one-shot query()와 persistent 클라이언트가 동일 문자열을 쓰도록 단일화한다.
+        """
+        parts = []
+        if history:
+            lines = []
+            for msg in history:
+                role = "사용자" if msg["role"] == "user" else "어시스턴트"
+                lines.append(f"{role}: {msg['content']}")
+            parts.append(f"[대화 이력]\n" + "\n".join(lines))
+        context_str = json.dumps(context, ensure_ascii=False, indent=2)
+        parts.append(f"[데이터 컨텍스트]\n{context_str}")
+        parts.append(f"[질문]\n{user_message}")
+        return "\n\n".join(parts)
+
     async def ask_with_context(
         self,
         system_prompt: str,
@@ -305,18 +414,27 @@ class ClaudeSDKAdapter(LLMAdapter):
         max_turns: int = 15,
         approve_skill_writes: bool | None = None,
         allowed_tools: list[str] | None = None,
+        thread_id=None,
     ) -> str:
-        parts = []
-        if history:
-            lines = []
-            for msg in history:
-                role = "사용자" if msg["role"] == "user" else "어시스턴트"
-                lines.append(f"{role}: {msg['content']}")
-            parts.append(f"[대화 이력]\n" + "\n".join(lines))
-        context_str = json.dumps(context, ensure_ascii=False, indent=2)
-        parts.append(f"[데이터 컨텍스트]\n{context_str}")
-        parts.append(f"[질문]\n{user_message}")
-        augmented_message = "\n\n".join(parts)
+        """컨텍스트 기반 생성.
+
+        thread_id가 주어지면(인터랙티브 스레드) 스레드별 stateful 클라이언트를 재사용하는
+        persistent 경로로 라우팅한다. None이면(무인 초기자·유틸 호출) 기존 one-shot query()
+        경로를 유지한다 — steer/상태 세션은 인터랙티브 전용(매트릭스).
+        """
+        augmented_message = self._augment_message(user_message, context, history)
+        if thread_id is not None:
+            return await self._call_claude_persistent(
+                thread_id,
+                system_prompt,
+                augmented_message,
+                on_text=on_text,
+                on_tool=on_tool,
+                counter=counter,
+                max_turns=max_turns,
+                approve_skill_writes=approve_skill_writes,
+                allowed_tools=allowed_tools,
+            )
         return await self._call_claude(
             system_prompt,
             augmented_message,

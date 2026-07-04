@@ -80,6 +80,9 @@ SCHEDULER_ENABLED = _env_bool("SCHEDULER_ENABLED", False)
 MAX_CRON_JOBS = int(os.getenv("MAX_CRON_JOBS", "50"))
 # Garmin 컨텍스트 캐시 TTL(초) — 겹치는 초기자의 429 완화용.
 HEALTH_CONTEXT_TTL = float(os.getenv("HEALTH_CONTEXT_TTL", "90"))
+# steer(interrupt-then-restart) — 이전 턴 interrupt 후 unwind를 기다릴 최대 시간(초).
+# 이 안에 unwind 못하면 클라이언트를 강제 정리하고 새 클라이언트로 재시작한다(무한 대기 방지).
+STEER_INTERRUPT_TIMEOUT = float(os.getenv("STEER_INTERRUPT_TIMEOUT", "20"))
 
 
 def parse_allowed_users(raw: str) -> set[int]:
@@ -386,6 +389,39 @@ def _build_system_prompt() -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+# 인터랙티브 스레드별 진행 중 생성 태스크 (thread_id → asyncio.Task) — steer 조율용.
+# 새 메시지가 오면 이 태스크를 interrupt한 뒤 새 생성으로 재시작(재개 아님)한다.
+_inflight_turns: dict = {}
+
+
+async def _steer_and_run(thread_id, gen_factory):
+    """steer — 같은 스레드에 진행 중 생성이 있으면 interrupt 후 unwind를 기다린 뒤 새 생성을 시작.
+
+    한 스레드의 stateful 클라이언트 스트림은 항상 한 생성만 읽게 직렬화해 인터리브/중복 스트림을
+    막는다. interrupt는 "재개"가 아니라 "재시작": 이전 턴의 남은 on_text는 더 이상 발화되지 않고
+    새 프롬프트로 다시 시작한다. 이전 턴이 제때 unwind하지 못하면 클라이언트를 강제 정리한다.
+    """
+    existing = _inflight_turns.get(thread_id)
+    if existing is not None and not existing.done():
+        try:
+            await llm.interrupt_session(thread_id)
+        except Exception as e:
+            print(f"⚠️ interrupt 실패(thread={thread_id}): {type(e).__name__}: {e}")
+        # 이전 턴의 receive_response가 종료(ResultMessage)되길 기다린다. wait는 timeout에도
+        # 태스크를 취소하지 않으므로(동시 awaiter 안전), 지연 시 클라이언트만 강제 정리한다.
+        _done, pending = await asyncio.wait({existing}, timeout=STEER_INTERRUPT_TIMEOUT)
+        if pending:
+            print(f"⚠️ interrupt unwind 지연(thread={thread_id}) — 클라이언트 강제 정리 후 재시작")
+            await llm.end_session(thread_id)
+    task = asyncio.create_task(gen_factory())
+    _inflight_turns[thread_id] = task
+    try:
+        return await task
+    finally:
+        if _inflight_turns.get(thread_id) is task:
+            _inflight_turns.pop(thread_id, None)
+
+
 async def handle_health_query(message: discord.Message, content: str, image_paths: list[str] | None = None):
     """스레드 기반 자연어 건강 질의 처리. TextBlock마다 즉시 전송."""
     full_system = _build_system_prompt()
@@ -401,6 +437,9 @@ async def handle_health_query(message: discord.Message, content: str, image_path
         # 세션 타임아웃 확인
         if session_mgr.is_expired(thread_id):
             session_mgr.clear(thread_id)
+            # 만료된 스레드의 stateful 클라이언트를 정리(누수 방지) + 진행 태스크 참조 제거.
+            await llm.end_session(thread_id)
+            _inflight_turns.pop(thread_id, None)
             history = None
         else:
             history = await build_history_from_thread(message.channel, exclude_last=True)
@@ -442,14 +481,19 @@ async def handle_health_query(message: discord.Message, content: str, image_path
         # 인터랙티브 오너 턴 = 특권 턴. approve_skill_writes=True로 skill-write + schedule/memory
         # mutation을 허용한다(무인 턴은 미전달 → PreToolUse 게이트가 하드 차단). 화이트리스트를
         # 통과한 오너만 이 경로에 도달한다(on_message).
-        reply_text = await llm.ask_with_context(
-            full_system, content, context,
-            history=history,
-            on_text=on_text,
-            on_tool=status.update,
-            counter=counter,
-            approve_skill_writes=True,
-        )
+        # thread_id를 넘겨 스레드별 stateful 클라이언트(persistent)로 라우팅하고, _steer_and_run으로
+        # 감싸 진행 중 턴이 있으면 interrupt-then-restart 한다(인터리브/중복 스트림 방지).
+        def _generate():
+            return llm.ask_with_context(
+                full_system, content, context,
+                history=history,
+                on_text=on_text,
+                on_tool=status.update,
+                counter=counter,
+                approve_skill_writes=True,
+                thread_id=thread_id,
+            )
+        reply_text = await _steer_and_run(thread_id, _generate)
     await status.clear()
 
     # 봇 답변은 턴 반환값에서 1회 색인 (청크 send_reply 아님 → 파편화 방지).
