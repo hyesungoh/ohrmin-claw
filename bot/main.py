@@ -4,6 +4,7 @@ import datetime
 import os
 import sys
 import tempfile
+import time
 
 import discord
 from discord.ext import tasks
@@ -27,6 +28,8 @@ from core.session_manager import SessionManager
 from core.apple_health_reader import sync_from_icloud
 from core.session_index import SessionIndex
 from core.session_search_tools import create_session_search_mcp_server
+from core.scheduler import CronStore
+from core.schedule_tools import create_schedule_mcp_server
 
 
 load_dotenv()
@@ -49,6 +52,22 @@ APPLE_HEALTH_EXPORT_DIR = os.getenv(
     os.path.expanduser("~/Library/Mobile Documents/iCloud~com~ifunography~HealthExport/Documents/daily inbody"),
 )
 SESSION_INDEX_DB_PATH = os.path.join(PROJECT_ROOT, "data", "session_index.db")
+CRON_JOBS_PATH = os.path.join(PROJECT_ROOT, "data", "cron_jobs.json")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """환경변수를 불리언으로 파싱 (1/true/yes/on = True)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# cron 스케줄러 — kill-switch(기본 off, NOTIFY_CHANNEL_ID 게이팅 미러), 잡 수 상한.
+SCHEDULER_ENABLED = _env_bool("SCHEDULER_ENABLED", False)
+MAX_CRON_JOBS = int(os.getenv("MAX_CRON_JOBS", "50"))
+# Garmin 컨텍스트 캐시 TTL(초) — 겹치는 초기자의 429 완화용.
+HEALTH_CONTEXT_TTL = float(os.getenv("HEALTH_CONTEXT_TTL", "90"))
 
 
 def parse_allowed_users(raw: str) -> set[int]:
@@ -93,6 +112,9 @@ body_metrics_mgr = BodyMetricsManager(BODY_METRICS_CSV_PATH)
 # 대화 장기기억 인덱스 (FTS5)
 session_index = SessionIndex(SESSION_INDEX_DB_PATH)
 
+# cron 스케줄러 스토어 (원자적 JSON 영속, 재시작 생존)
+cron_store = CronStore(CRON_JOBS_PATH)
+
 # MCP 서버 생성
 mcp_servers = {}
 if garmin:
@@ -112,6 +134,13 @@ mcp_servers["memory"] = memory_mcp
 session_search_mcp = create_session_search_mcp_server(session_index)
 mcp_servers["session_search"] = session_search_mcp
 
+# 스케줄 MCP (NL cron 스케줄러 CRUD → mcp__schedule__schedule_create 등)
+# deliver 기본 채널 = NOTIFY_CHANNEL_ID. 무인 초기자엔 schedule_list만 노출(allowed_tools 매트릭스).
+schedule_mcp = create_schedule_mcp_server(
+    cron_store, default_channel_id=NOTIFY_CHANNEL_ID, max_jobs=MAX_CRON_JOBS
+)
+mcp_servers["schedule"] = schedule_mcp
+
 # LLM 어댑터
 llm = create_llm_adapter(LLM_ADAPTER_TYPE, model=LLM_MODEL, mcp_servers=mcp_servers or None, cwd=PROJECT_ROOT)
 
@@ -128,6 +157,29 @@ channel = DiscordChannel(token=DISCORD_TOKEN or "")
 
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_IMAGES = 5
+
+# 무인 초기자(cron tick·자동 분석) 도구셋 — 권한 매트릭스: 읽기/분석 도구 + schedule_list만.
+# schedule mutation(create/pause/resume/remove)·skill-write(Write/Edit)·memory-write를 제외한다.
+# 주의: permission_mode="bypassPermissions" 하에서 allowed_tools는 하드 샌드박스가 아니라 모델
+# 스티어링 신호에 가깝다(--allowedTools). skill-write는 PreToolUse 훅이 하드 차단하고,
+# schedule mutation은 무인 도구셋에서 제외해 무인 턴이 시도하지 않도록 강제한다.
+UNATTENDED_ALLOWED_TOOLS = [
+    "Bash", "Read", "Glob", "Grep", "Skill", "WebSearch", "WebFetch",
+    "mcp__garmin", "mcp__body_metrics", "mcp__session_search",
+    "mcp__schedule__schedule_list",  # 무인: 조회만 (mutation 제외)
+]
+
+# Garmin 429 완화 — 겹치는 초기자(on_message·cron_tick·2분 루프)가 동시에 5콜 Garmin 버스트를
+# 내지 않도록 컨텍스트 수집을 세마포어(동시 1)로 직렬화 + 단기 TTL 캐시로 중복 제거한다.
+_garmin_context_semaphore = asyncio.Semaphore(1)
+_context_cache_lock = asyncio.Lock()
+_context_cache: dict = {"ts": 0.0, "data": None}
+
+
+def _invalidate_context_cache():
+    """건강 컨텍스트 캐시 무효화 — 새 데이터 도착(2분 루프) 시 강제 재수집용."""
+    _context_cache["data"] = None
+    _context_cache["ts"] = 0.0
 
 
 def extract_image_attachments(attachments: list[discord.Attachment]) -> list[discord.Attachment]:
@@ -273,8 +325,27 @@ def _collect_health_context() -> dict:
 
 
 async def _collect_health_context_async() -> dict:
-    """Run the sync context collector in a thread to avoid blocking the asyncio event loop."""
-    return await asyncio.to_thread(_collect_health_context)
+    """건강 컨텍스트를 수집 — 단기 TTL 캐시 + 세마포어로 Garmin 429 완화.
+
+    캐시가 신선하면 재사용(중복 5콜 버스트 제거), 미스 시 세마포어로 직렬화해 한 번에 한
+    초기자만 Garmin을 호출한다. 동기 수집은 스레드로 오프로드해 이벤트 루프를 막지 않는다.
+    """
+    now = time.monotonic()
+    async with _context_cache_lock:
+        if _context_cache["data"] is not None and (now - _context_cache["ts"]) < HEALTH_CONTEXT_TTL:
+            return _context_cache["data"]
+
+    async with _garmin_context_semaphore:
+        # 세마포어 대기 중 다른 태스크가 이미 갱신했을 수 있으니 재확인(double-checked).
+        async with _context_cache_lock:
+            fresh = time.monotonic()
+            if _context_cache["data"] is not None and (fresh - _context_cache["ts"]) < HEALTH_CONTEXT_TTL:
+                return _context_cache["data"]
+        data = await asyncio.to_thread(_collect_health_context)
+        async with _context_cache_lock:
+            _context_cache["data"] = data
+            _context_cache["ts"] = time.monotonic()
+        return data
 
 
 async def build_history_from_thread(
@@ -590,12 +661,14 @@ async def _run_auto_analysis(new_rows: list[dict]):
         f"체성분 트렌드와 수면 효율을 종합적으로 분석해주세요."
     )
 
-    # 무인 초기자 — approve_skill_writes 미전달(= skill-write 차단 유지).
+    # 무인 초기자 — approve_skill_writes 미전달(= skill-write 차단 유지) + 축소 도구셋
+    # (매트릭스: schedule mutation·skill-write 제외, schedule_list만).
     await run_agent_to_channel(
         user_message,
         NOTIFY_CHANNEL_ID,
         f"체성분 자동 분석 — {latest_date}",
         context=context,
+        allowed_tools=UNATTENDED_ALLOWED_TOOLS,
     )
 
 
@@ -606,6 +679,7 @@ async def health_sync_loop():
         new_rows = await asyncio.to_thread(sync_from_icloud, APPLE_HEALTH_EXPORT_DIR, body_metrics_mgr)
         if new_rows:
             print(f"📊 새 체성분 데이터 {len(new_rows)}건 동기화됨")
+            _invalidate_context_cache()  # 새 데이터 반영 위해 캐시 무효화(신선 컨텍스트 재수집)
             await _run_auto_analysis(new_rows)
     except Exception as e:
         print(f"⚠️ 자동 동기화 오류: {e}")
@@ -614,6 +688,73 @@ async def health_sync_loop():
 @health_sync_loop.before_loop
 async def before_health_sync():
     await channel._client.wait_until_ready()
+
+
+def _scheduler_now() -> datetime.datetime:
+    """스케줄러 기준 현재 시각 — 로컬 타임존 aware (scheduler 매처의 tz 가정)."""
+    return datetime.datetime.now().astimezone()
+
+
+async def _run_cron_job(job: dict, now: datetime.datetime):
+    """단일 cron 잡 실행 — 예외를 삼켜 한 잡 실패가 나머지 due 잡·루프를 죽이지 않게 격리한다.
+
+    무인 초기자이므로 축소 도구셋(UNATTENDED_ALLOWED_TOOLS)을 넘기고 approve_skill_writes는
+    전달하지 않는다(skill-write 차단 유지). full memory/user 정책은 run_agent_to_channel의
+    _build_system_prompt 조립으로 자동 적용된다(자동 분석과 동일, M6).
+    """
+    job_id = job.get("id")
+    try:
+        channel_id = job.get("deliver_channel_id") or NOTIFY_CHANNEL_ID
+        thread_name = f"⏰ 예약 실행 — {now.strftime('%m-%d %H:%M')}"
+        await run_agent_to_channel(
+            job.get("prompt", ""),
+            channel_id,
+            thread_name,
+            max_turns=int(job.get("max_turns") or 15),
+            allowed_tools=UNATTENDED_ALLOWED_TOOLS,
+        )
+    except Exception as e:
+        print(f"⚠️ cron 잡 실행 실패(id={job_id}): {type(e).__name__}: {e}")
+    finally:
+        # 발화 후 상태 갱신 — 실패해도 next_run을 전진시켜 매 분 재시도 폭주를 막는다.
+        # 상대 one-shot은 여기서 자기 삭제된다.
+        try:
+            cron_store.mark_fired(job_id, now)
+        except Exception as e:
+            print(f"⚠️ cron 상태 갱신 실패(id={job_id}): {e}")
+
+
+async def _cron_tick_once(now: datetime.datetime):
+    """한 번의 tick — due·비-paused 잡을 순회 실행. per-job try/except로 실패를 격리한다.
+
+    tasks.loop 래퍼와 분리해 단위 테스트에서 직접 호출 가능하게 둔다.
+    """
+    try:
+        due_jobs = cron_store.due_jobs(now)
+    except Exception as e:
+        print(f"⚠️ cron due 조회 실패: {e}")
+        return
+    for job in due_jobs:
+        await _run_cron_job(job, now)
+
+
+@tasks.loop(minutes=1)
+async def cron_tick_loop():
+    """매 1분: due·비-paused cron 잡을 실행."""
+    await _cron_tick_once(_scheduler_now())
+
+
+@cron_tick_loop.before_loop
+async def before_cron_tick():
+    await channel._client.wait_until_ready()
+
+
+@cron_tick_loop.error
+async def cron_tick_error(exc: Exception):
+    """루프 자체가 죽으면 로깅 후 재시작(loop-death 방지)."""
+    print(f"⚠️ cron_tick_loop 오류 — 재시작: {type(exc).__name__}: {exc}")
+    if not cron_tick_loop.is_running():
+        cron_tick_loop.restart()
 
 
 _session_backfill_done = False
@@ -654,6 +795,13 @@ async def on_ready():
     if not health_sync_loop.is_running():
         health_sync_loop.start()
         print(f"📊 Apple Health 자동 동기화 시작 (2분 주기, 경로: {APPLE_HEALTH_EXPORT_DIR})")
+    # cron 스케줄러 — kill-switch(SCHEDULER_ENABLED)로 게이팅. 미설정 시 비활성.
+    if SCHEDULER_ENABLED:
+        if not cron_tick_loop.is_running():
+            cron_tick_loop.start()
+            print(f"⏰ cron 스케줄러 시작 (1분 주기, 등록 잡 {cron_store.count()}개)")
+    else:
+        print("⏰ cron 스케줄러 비활성 (SCHEDULER_ENABLED 미설정)")
     if not _session_backfill_done:
         _session_backfill_done = True
         await _backfill_session_index()

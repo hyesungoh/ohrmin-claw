@@ -20,3 +20,19 @@ def isolate_session_index(tmp_path, monkeypatch):
         SessionIndex(str(tmp_path / "test_session_index.db")),
         raising=False,
     )
+
+
+@pytest.fixture(autouse=True)
+def reset_health_context_cache():
+    """건강 컨텍스트 TTL 캐시를 테스트별로 초기화.
+
+    bot.main._context_cache는 모듈 레벨 가변 상태라 테스트 간 오염(warm cache 재사용)을
+    유발한다. _collect_health_context_async를 직접 호출하는 테스트가 매번 신선하게 수집하도록
+    각 테스트 전에 무효화한다. import 불가 환경에서는 무해하게 건너뛴다.
+    """
+    try:
+        import bot.main as main_module
+    except Exception:
+        return
+    if hasattr(main_module, "_invalidate_context_cache"):
+        main_module._invalidate_context_cache()
