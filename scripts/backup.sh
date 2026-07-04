@@ -22,6 +22,29 @@ for db_name in garmin garmin_activities garmin_summary; do
     fi
 done
 
+# 봇 데이터(data/) 백업 — 세션 인덱스(SQL 덤프), cron 잡, 체성분 CSV.
+DATA_DIR="$PROJECT_DIR/data"
+mkdir -p "$BACKUP_DIR/data"
+
+# session_index.db → SQL 덤프. sqlite3 연결이 WAL/SHM 사이드카를 읽으므로 덤프에 최신 상태가 포함됨.
+if [ -f "$DATA_DIR/session_index.db" ]; then
+    sqlite3 "$DATA_DIR/session_index.db" .dump > "$BACKUP_DIR/data/session_index.sql"
+    echo "✅ session_index.db → data/session_index.sql 백업 완료"
+else
+    echo "ℹ️ session_index.db 없음. 건너뜁니다."
+fi
+
+# JSON/CSV(cron 잡·체성분)는 그대로 복사.
+for data_file in cron_jobs.json inbody.csv; do
+    src="$DATA_DIR/$data_file"
+    if [ -f "$src" ]; then
+        cp "$src" "$BACKUP_DIR/data/${data_file}"
+        echo "✅ data/${data_file} 백업 완료"
+    else
+        echo "ℹ️ data/${data_file} 없음. 건너뜁니다."
+    fi
+done
+
 # git commit (프로젝트 디렉토리에서)
 cd "$PROJECT_DIR"
 if git diff --quiet backups/ 2>/dev/null; then
