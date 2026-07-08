@@ -781,10 +781,22 @@ async def _run_auto_analysis(new_rows: list[dict]):
     sleep_briefing = _format_sleep_briefing(context.get("sleep", {}))
 
     user_message = (
-        f"새로운 체성분 데이터가 Apple Health에서 자동 수집되었습니다.\n\n"
+        f"새로운 체성분 데이터가 Apple Health에서 자동 수집됨.\n\n"
         f"**📊 체성분 데이터:**\n{summary}\n\n"
         f"**😴 어젯밤 수면:**\n{sleep_briefing}\n\n"
-        f"체성분 트렌드와 수면 효율을 종합적으로 분석해주세요."
+        f"체성분 트렌드와 수면을 데이터 기반으로 서술.\n\n"
+        f"[지시]\n"
+        f"1. **라벨 규칙**: `muscle_mass_kg` 컬럼은 `source`에 따라 해석이 다름. "
+        f"`source=apple_health`면 **제지방(FFM)** 으로 표기(Apple Health가 lean body mass로 보내기 때문). "
+        f"`source=inbody`(가정용·전문가 장비 모두 여기로 들어옴) / `source=manual`이면 **골격근**으로 표기. "
+        f"자동 수집 데이터(이 트리거)는 apple_health 소스이므로 제지방으로 다룰 것.\n"
+        f"2. **밴드 비교 필수**: 최근 60일 체성분 밴드(min/max)를 `mcp__body_metrics__get_body_metrics_history`로 실측 조회한 뒤 현재값과 비교. "
+        f"밴드 내면 '정체/BIA 노이즈 범위'로 분류하고 원인 가설 만들지 말 것. 밴드 이탈 시에만 원인 논의. "
+        f"BIA는 하루 ±1.5%p 노이즈가 정상 — 단일 측정치나 3~4일 변동을 트렌드로 오독 금지.\n"
+        f"3. **운동 볼륨 실측 조회 필수**: 최근 30일 러닝 세션수·거리·페이스·심박존, 웨이트 세션수·주요 리프트를 "
+        f"`mcp__garmin__get_activities`로 실측 조회한 뒤 논평. 이전 대화·메모리의 낡은 요약(§11 등) 재사용 금지.\n"
+        f"4. **톤**: '경보/위험/⚠️' 헤더 금지. 침착·근거 기반 서술. 정체 구간이면 짧게 마무리해도 됨.\n"
+        f"5. **액션**: 별도 섹션으로 강제 서술하지 말 것. 문맥상 필요한 만큼만 자연스럽게 언급. 개수 제한 없음, 필요 없으면 생략."
     )
 
     # 무인 초기자 — approve_skill_writes 미전달(= skill-write 차단 유지) + 축소 도구셋
