@@ -12,7 +12,7 @@ from claude_agent_sdk.types import AssistantMessage, TextBlock, ToolUseBlock
 # cwd(스킬/빌트인 도구) 활성화 시 기본 노출 도구셋. 초기자별로 축소 도구셋을
 # 넘기고 싶으면 _call_claude(allowed_tools=...)로 재정의한다 (무인 초기자 = skill-write 제외 등).
 # WebSearch/WebFetch는 읽기 전용이라 매트릭스상 전 초기자(무인 포함)에 허용된다.
-DEFAULT_ALLOWED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill", "WebSearch", "WebFetch"]
+DEFAULT_ALLOWED_TOOLS = ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep", "Skill", "WebSearch", "WebFetch"]
 
 # skill-write 게이트가 감시하는 파일 쓰기 도구. matcher 문자열과 정렬 유지.
 _WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}

@@ -21,6 +21,7 @@ from core.learning import (
     detect_skill_writes,
     SKILL_RESTART_NOTICE,
 )
+from core.skill_sync import sync_agent_made_symlinks
 from core.garmin_data import GarminConnectClient, GarminDataError
 from core.garmin_tools import create_garmin_mcp_server
 from core.body_metrics import BodyMetricsManager
@@ -540,6 +541,9 @@ async def handle_health_query(message: discord.Message, content: str, image_path
             turn_id,
         )
 
+    # 이번 턴에 에이전트가 `.agent-made/<name>/`에 스킬을 썼으면(CLI가 `.claude/` 직접 쓰기를
+    # 하드 차단하므로 이 경로로 우회) `.claude/skills/<name>` 심링크로 노출 — 그래야 아래 detect가 잡는다.
+    sync_agent_made_symlinks(PROJECT_ROOT)
     # hot-load 폴백: 이번 턴에 오너 승인으로 스킬이 저장/수정됐으면 재시작 안내.
     # (SDK 스킬 hot-load를 라이브 확인할 수 없어 재시작 후 적용을 보장하는 폴백 경로를 택했다.)
     new_skills = detect_skill_writes(SKILLS_DIR, skills_before)
@@ -962,6 +966,11 @@ async def _backfill_session_index():
 async def on_ready():
     global _session_backfill_done
     print(f"✅ {channel._client.user} 로그인 완료!")
+    # `.agent-made/<name>/` 에이전트 생성 스킬을 `.claude/skills/<name>` 심링크로 노출
+    # (CLI가 `.claude/` 직접 쓰기를 차단하므로 에이전트는 `.agent-made/`에 쓰고 여기서 링크한다).
+    linked = sync_agent_made_symlinks(PROJECT_ROOT)
+    if linked:
+        print(f"🔗 .agent-made 스킬 심링크 동기화: {', '.join(linked)}")
     if not health_sync_loop.is_running():
         health_sync_loop.start()
         print(f"📊 Apple Health 자동 동기화 시작 (2분 주기, 경로: {APPLE_HEALTH_EXPORT_DIR})")
