@@ -5,7 +5,7 @@ import os
 import pytest
 
 from core.body_metrics import BodyMetricsManager
-from core.apple_health_reader import sync_from_icloud
+from core.apple_health_reader import IGNORE_DATES, sync_from_icloud
 
 
 def _make_hae_json(metrics: list[dict]) -> dict:
@@ -152,6 +152,27 @@ class TestSyncFromIcloud:
         mgr = BodyMetricsManager(csv_path)
         new_rows = sync_from_icloud(str(tmp_path / "nonexistent"), mgr)
         assert len(new_rows) == 0
+
+    def test_ignore_dates_skips_noise(self, hae_dir, csv_path, monkeypatch):
+        """IGNORE_DATES에 포함된 날짜의 InBody 데이터는 CSV로 유입되지 않는다."""
+        monkeypatch.setattr(
+            "core.apple_health_reader.IGNORE_DATES", {"2026-04-26"}
+        )
+        data = _make_hae_json([
+            {"name": "weight_body_mass", "units": "kg",
+             "data": [{"qty": 104.6, "date": "2026-04-26 12:47:00 +0900", "source": "InBody"}]},
+        ])
+        _write_json(hae_dir, "HealthAutoExport-2026-04-26.json", data)
+
+        mgr = BodyMetricsManager(csv_path)
+        new_rows = sync_from_icloud(hae_dir, mgr)
+
+        assert len(new_rows) == 0
+        assert mgr.read_all() == []
+
+    def test_ignore_dates_is_configured(self):
+        """실제 노이즈 날짜(2026-07-18)가 IGNORE_DATES에 등록되어 있다."""
+        assert "2026-07-18" in IGNORE_DATES
 
     def test_coexists_with_manual_entries(self, hae_dir, csv_path):
         """수동 입력(manual)과 자동 수집(apple_health)이 별도 행으로 공존한다."""
