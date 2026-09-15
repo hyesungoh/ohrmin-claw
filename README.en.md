@@ -116,8 +116,7 @@ DISCORD_APPLICATION_ID=your-application-id
 ALLOWED_USERS=123456789012345678    # Discord User ID (comma-separated)
 
 # Optional
-LLM_ADAPTER=claude                  # default
-LLM_MODEL=claude-sonnet-4-20250514  # default
+XAI_API_KEY=                        # grok backend only (backend is chosen in config.json)
 MEMORY_MODE=auto                    # auto | manual
 SESSION_IDLE_TIMEOUT=1440           # minutes (default: 24 hours)
 NOTIFY_CHANNEL_ID=                  # channel for auto-analysis alerts (disabled if unset)
@@ -127,7 +126,43 @@ APPLE_HEALTH_EXPORT_DIR=            # Health Auto Export iCloud path (has a defa
 > Leaving `ALLOWED_USERS` empty causes the bot to ignore all messages (whitelist mode).
 > Enable Developer Mode in Discord settings → right-click your profile → "Copy User ID".
 
-### 4. Start the bot
+### 4. Choose the LLM backend (config.json)
+
+The LLM backend is selected in `config.json` at the repository root. It contains no secrets, so it can be committed. Change `llm.backend` and **restart the bot** — the whole bot (chat, tools, skills, cron, auto-analysis) then runs on that backend. If the selected backend is unusable, the bot prints the cause and a fix command and refuses to start — it never falls back to another backend.
+
+| `llm.backend` | Setup | Auth |
+|---|---|---|
+| `claude` (default) | `claude login` | Claude subscription |
+| `codex` | Install the Codex CLI, then `codex login` | ChatGPT subscription (API keys not allowed) |
+| `grok` | Install the Grok Build CLI (`~/.grok/bin/grok`), set `XAI_API_KEY` in `.env` | xAI API key |
+
+Default `config.json`:
+
+```json
+{
+  "llm": {
+    "backend": "claude",
+    "claude": {"model": null, "skills": "native"},
+    "codex": {"model": null, "bin": "codex"},
+    "grok": {"model": null, "bin": "~/.grok/bin/grok"}
+  }
+}
+```
+
+Codex and Grok examples live in `config.examples/`.
+
+```bash
+cp config.examples/codex.json config.json   # Codex
+cp config.examples/grok.json config.json    # Grok — replace llm.grok.model with a real model ID (required)
+```
+
+- `llm.<backend>.model`: `null` uses the default model (Claude: `.env` `LLM_MODEL` → `claude-sonnet-4-20250514`; Codex: CLI default). Required for Grok.
+- `llm.claude.skills`: `native` (default, Claude's native skill loading) | `registry` (the bot injects a skill catalog — same mechanism as Codex/Grok).
+
+> ⚠️ The Codex and Grok backends are implemented against official docs and verified only with fake runtimes. Production use is not recommended until verified with real accounts; the bot prints `[llm] WARN UNVERIFIED ...` at startup.
+> `LLM_ADAPTER`/`LLM_MODEL` in `.env` are deprecated. Startup is refused if `LLM_ADAPTER` differs from `llm.backend`, or if `LLM_MODEL` and `llm.claude.model` are both set and differ. Startup is also refused when `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `CODEX_API_KEY` is set (Claude and Codex allow subscription login only).
+
+### 5. Start the bot
 
 ```bash
 python3 bot/main.py
@@ -244,8 +279,12 @@ User (Discord chat)
 ohrmin-claw/
 ├── bot/
 │   └── main.py                 # bot entry point
+├── config.json                 # LLM backend selection (claude | codex | grok)
+├── config.examples/            # Codex/Grok config examples
 ├── core/
-│   ├── llm.py                  # LLM adapter (ClaudeSDKAdapter)
+│   ├── llm.py                  # LLM adapter contract + ClaudeSDKAdapter + factory
+│   ├── runtimes/               # Codex/Grok adapters (JSON-RPC stdio)
+│   ├── tool_server/            # shared tool layer (Claude SDK · HTTP MCP)
 │   ├── channel.py              # channel adapter (DiscordChannel)
 │   ├── garmin_data.py          # Garmin Connect API client
 │   ├── garmin_tools.py         # Garmin MCP tools (9)
@@ -286,7 +325,7 @@ ohrmin-claw/
 | Item | Details |
 |------|---------|
 | Language | Python 3.11+ |
-| AI | [Claude Agent SDK](https://github.com/anthropics/claude-code/tree/main/packages/agent-sdk) (subscription model) |
+| AI | [Claude Agent SDK](https://github.com/anthropics/claude-code/tree/main/packages/agent-sdk) (subscription, default) · Codex app-server (ChatGPT subscription) · Grok Build CLI (xAI API key) — selected in `config.json` |
 | Discord | [discord.py](https://github.com/Rapptz/discord.py) |
 | Garmin | [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) (direct API calls) |
 | Data | CSV (body composition) |
