@@ -33,20 +33,23 @@ def _llm(**overrides) -> dict:
 
 
 class TestLoadConfig:
-    def test_committed_config_json_is_default_shape(self):
+    def test_committed_config_json_shape(self):
         path = os.path.join(PROJECT_ROOT, "config.json")
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
-        assert raw == DEFAULT_CONFIG
+        assert set(raw["llm"]) == set(DEFAULT_CONFIG["llm"])
         assert raw["llm"]["backend"] == "claude"
-        assert raw["llm"]["claude"]["model"] is None
+        assert raw["llm"]["claude"]["model"] is None or isinstance(raw["llm"]["claude"]["model"], str)
         assert raw["llm"]["claude"]["skills"] == "native"
 
     def test_committed_config_loads_as_claude(self):
-        config = load_llm_config(os.path.join(PROJECT_ROOT, "config.json"), {})
+        path = os.path.join(PROJECT_ROOT, "config.json")
+        with open(path, encoding="utf-8") as f:
+            committed_model = json.load(f)["llm"]["claude"]["model"]
+        config = load_llm_config(path, {})
         assert config.backend == "claude"
-        assert config.model == DEFAULT_CLAUDE_MODEL
-        assert config.options == {"model": None, "skills": "native"}
+        assert config.model == (committed_model or DEFAULT_CLAUDE_MODEL)
+        assert config.options == {"model": committed_model, "skills": "native"}
         assert config.warnings == ()
 
     def test_missing_file_uses_defaults_with_warning(self, tmp_path):

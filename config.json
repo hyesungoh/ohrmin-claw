@@ -1,7 +1,7 @@
 {
   "llm": {
     "backend": "claude",
-    "claude": {"model": null, "skills": "native"},
+    "claude": {"model": "claude-opus-5", "skills": "native"},
     "codex": {"model": null, "bin": "codex"},
     "grok": {"model": null, "bin": "~/.grok/bin/grok"}
   }

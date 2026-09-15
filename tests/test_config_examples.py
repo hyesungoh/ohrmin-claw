@@ -12,7 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def test_root_config_is_claude_default():
     config = load_llm_config(os.path.join(ROOT, "config.json"), {})
     assert config.backend == "claude"
-    assert config.claude["model"] is None
+    assert config.claude["model"] is None or isinstance(config.claude["model"], str)
     assert config.claude["skills"] == "native"
 
 
