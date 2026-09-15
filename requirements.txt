@@ -13,6 +13,11 @@ pandas~=3.0.2
 # LLM
 claude-agent-sdk==0.1.66
 
+# 공유 도구 서버 (루프백 streamable HTTP MCP — bot/main.py가 항상 import, 기동은 codex/grok 백엔드에서만)
+mcp==1.27.0
+uvicorn==0.46.0
+starlette==1.0.0
+
 # Environment
 python-dotenv~=1.2.2
 

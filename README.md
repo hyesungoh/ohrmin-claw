@@ -116,8 +116,7 @@ DISCORD_APPLICATION_ID=your-application-id
 ALLOWED_USERS=123456789012345678    # Discord User ID (쉼표 구분)
 
 # 선택
-LLM_ADAPTER=claude                  # 기본값
-LLM_MODEL=claude-sonnet-4-20250514  # 기본값
+XAI_API_KEY=                        # grok 백엔드 전용 (백엔드 선택은 config.json)
 MEMORY_MODE=auto                    # auto | manual
 SESSION_IDLE_TIMEOUT=1440           # 분 (기본 24시간)
 NOTIFY_CHANNEL_ID=                  # 자동 분석 알림 채널 (미설정 시 비활성화)
@@ -127,7 +126,43 @@ APPLE_HEALTH_EXPORT_DIR=            # Health Auto Export iCloud 경로 (기본�
 > `ALLOWED_USERS`를 비워두면 모든 메시지를 무시합니다 (화이트리스트 방식).
 > Discord 설정 → 고급 → 개발자 모드 ON → 본인 프로필 우클릭 → "Copy User ID"
 
-### 4. 봇 실행
+### 4. LLM 백엔드 선택 (config.json)
+
+LLM 백엔드는 저장소 루트의 `config.json`에서 고릅니다. 비밀값이 없어 커밋해도 되며, `llm.backend`를 바꾼 뒤 **봇을 재시작**하면 봇 전체(대화·도구·스킬·크론·자동 분석)가 해당 백엔드로 동작합니다. 선택한 백엔드를 쓸 수 없으면 원인과 해결 명령을 출력하고 기동을 멈춥니다 — 다른 백엔드로 자동 대체하지 않습니다.
+
+| `llm.backend` | 준비 | 인증 |
+|---|---|---|
+| `claude` (기본) | `claude login` | Claude 구독 |
+| `codex` | Codex CLI 설치 후 `codex login` | ChatGPT 구독 (API 키 불가) |
+| `grok` | Grok Build CLI 설치(`~/.grok/bin/grok`), `.env`에 `XAI_API_KEY` | xAI API 키 |
+
+기본 `config.json`:
+
+```json
+{
+  "llm": {
+    "backend": "claude",
+    "claude": {"model": null, "skills": "native"},
+    "codex": {"model": null, "bin": "codex"},
+    "grok": {"model": null, "bin": "~/.grok/bin/grok"}
+  }
+}
+```
+
+Codex·Grok 예시는 `config.examples/`에 있습니다.
+
+```bash
+cp config.examples/codex.json config.json   # Codex
+cp config.examples/grok.json config.json    # Grok — llm.grok.model을 실제 모델 ID로 바꾸세요 (필수)
+```
+
+- `llm.<backend>.model`: `null`이면 기본 모델(Claude는 `.env`의 `LLM_MODEL` → `claude-sonnet-4-20250514`, Codex는 CLI 기본값). Grok은 필수.
+- `llm.claude.skills`: `native`(기본, Claude 네이티브 스킬 로딩) | `registry`(봇이 스킬 카탈로그를 주입 — Codex·Grok과 같은 방식).
+
+> ⚠️ Codex·Grok 백엔드는 공식 문서 기준으로 구현하고 모의 런타임으로만 검증했습니다. 실계정 확인 전에는 운영 사용을 권장하지 않으며, 기동 시 `[llm] WARN UNVERIFIED ...` 경고가 출력됩니다.
+> `.env`의 `LLM_ADAPTER`/`LLM_MODEL`은 deprecated입니다. `LLM_ADAPTER`가 `llm.backend`와 다르거나 `LLM_MODEL`과 `llm.claude.model`이 서로 다르면 기동을 거부합니다. `ANTHROPIC_API_KEY`·`OPENAI_API_KEY`·`CODEX_API_KEY`가 설정돼 있어도 기동을 거부합니다(Claude·Codex는 구독 로그인만 허용).
+
+### 5. 봇 실행
 
 ```bash
 python3 bot/main.py
@@ -242,8 +277,12 @@ Apple Health 동기화와 자동 분석은 봇 프로세스 내부에서 2분 �
 ohrmin-claw/
 ├── bot/
 │   └── main.py                 # 봇 엔트리포인트
+├── config.json                 # LLM 백엔드 선택 (claude | codex | grok)
+├── config.examples/            # Codex·Grok 설정 예시
 ├── core/
-│   ├── llm.py                  # LLM 어댑터 (ClaudeSDKAdapter)
+│   ├── llm.py                  # LLM 어댑터 계약 + ClaudeSDKAdapter + 팩토리
+│   ├── runtimes/               # Codex·Grok 어댑터 (JSON-RPC stdio)
+│   ├── tool_server/            # 공유 도구 계층 (Claude SDK · HTTP MCP)
 │   ├── channel.py              # 채널 어댑터 (DiscordChannel)
 │   ├── garmin_data.py          # Garmin Connect API 클라이언트
 │   ├── garmin_tools.py         # Garmin MCP 도구 (9개)
@@ -284,7 +323,7 @@ ohrmin-claw/
 | 항목 | 내용 |
 |------|------|
 | 언어 | Python 3.11+ |
-| AI | [Claude Agent SDK](https://github.com/anthropics/claude-code/tree/main/packages/agent-sdk) (구독 모델) |
+| AI | [Claude Agent SDK](https://github.com/anthropics/claude-code/tree/main/packages/agent-sdk) (구독, 기본) · Codex app-server (ChatGPT 구독) · Grok Build CLI (xAI API 키) — `config.json`으로 선택 |
 | Discord | [discord.py](https://github.com/Rapptz/discord.py) |
 | Garmin | [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) (API 직접 호출) |
 | 데이터 | CSV (체성분) |

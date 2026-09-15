@@ -1,0 +1,8 @@
+{
+  "llm": {
+    "backend": "grok",
+    "claude": {"model": null, "skills": "native"},
+    "codex": {"model": null, "bin": "codex"},
+    "grok": {"model": "REPLACE_WITH_GROK_MODEL_ID", "bin": "~/.grok/bin/grok"}
+  }
+}

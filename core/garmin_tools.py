@@ -1,10 +1,9 @@
-"""Garmin 데이터 MCP tool 정의 — Claude Agent SDK 인프로세스 서버."""
+"""Garmin 데이터 MCP tool 정의 — 백엔드 중립 ServerSpec (transport는 core/tool_server)."""
 import asyncio
 import datetime
 import json
-from typing import Annotated
 
-from claude_agent_sdk import tool, create_sdk_mcp_server
+from core.tool_server.spec import ParamSpec, ServerSpec, tool
 
 
 MAX_RANGE_DAYS = 90
@@ -29,12 +28,12 @@ def _json_response(data) -> dict:
 
 
 def create_garmin_mcp_server(garmin_client):
-    """GarminConnectClient를 감싸는 인프로세스 MCP 서버 생성."""
+    """GarminConnectClient를 감싸는 MCP 서버 정의(ServerSpec) 생성."""
     TOOL_REGISTRY.clear()
 
     DATE_SCHEMA = {
-        "start": Annotated[str, "시작 날짜 (YYYY-MM-DD). 생략 시 7일 전"],
-        "end": Annotated[str, "종료 날짜 (YYYY-MM-DD). 생략 시 오늘"],
+        "start": ParamSpec("string", "시작 날짜 (YYYY-MM-DD). 생략 시 7일 전"),
+        "end": ParamSpec("string", "종료 날짜 (YYYY-MM-DD). 생략 시 오늘"),
     }
 
     @tool("get_sleep", "수면 데이터 조회 (일별 총수면, 깊은수면, REM, 점수)", DATE_SCHEMA)
@@ -70,7 +69,7 @@ def create_garmin_mcp_server(garmin_client):
     # --- 상세 활동 tool ---
 
     ACTIVITY_ID_SCHEMA = {
-        "activity_id": Annotated[str, "활동 ID (get_activities로 먼저 조회)"],
+        "activity_id": ParamSpec("string", "활동 ID (get_activities로 먼저 조회)", required=True),
     }
 
     @tool("get_activity_detail", "특정 활동의 상세 분석 (스플릿, HR 존, VO2 Max, 케이던스)", ACTIVITY_ID_SCHEMA)
@@ -91,7 +90,7 @@ def create_garmin_mcp_server(garmin_client):
     # --- get_last_activity tool ---
 
     LAST_ACTIVITY_SCHEMA = {
-        "count": Annotated[int, "조회할 활동 수 (기본 1, 최대 10)"],
+        "count": ParamSpec("integer", "조회할 활동 수 (기본 1, 최대 10)"),
     }
 
     @tool("get_last_activity", "최근 활동 조회 (가장 마지막 운동부터). count로 개수 지정", LAST_ACTIVITY_SCHEMA)
@@ -108,7 +107,7 @@ def create_garmin_mcp_server(garmin_client):
 
     TOOL_REGISTRY.update({t.name: t for t in all_tools})
 
-    return create_sdk_mcp_server(
+    return ServerSpec(
         name="garmin",
         tools=all_tools,
     )

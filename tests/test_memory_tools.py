@@ -30,7 +30,7 @@ def _parse_result(result):
 class TestMemoryMcpServer:
     def test_server_created(self, memory_server):
         assert memory_server is not None
-        assert memory_server["name"] == "memory"
+        assert memory_server.name == "memory"
 
     def test_has_required_tools(self, memory_tools):
         assert "list_memory" in memory_tools

@@ -13,7 +13,10 @@ from dotenv import load_dotenv
 # 프로젝트 루트를 sys.path에 추가
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.llm import create_llm_adapter, _CLAUDE_FALLBACK_MESSAGE
+from core.llm import create_llm_adapter_from_config
+from core.llm_config import load_llm_config_safe
+from core.llm_errors import StartupError, is_llm_error_reply
+from core.preflight import default_runner, run_preflight
 from core.learning import (
     should_propose_skill,
     is_explicit_skill_request,
@@ -38,19 +41,26 @@ from core.session_index import SessionIndex
 from core.session_search_tools import create_session_search_mcp_server
 from core.scheduler import CronStore
 from core.schedule_tools import create_schedule_mcp_server
+from core.skill_registry import SkillRegistry, create_skills_mcp_server
+from core.tool_server.capability import CallerCapability
+from core.tool_server.claude_sdk_bridge import to_sdk_servers
+from core.tool_server.http_server import SharedToolServer
 
 
 load_dotenv()
 
 # 설정
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-LLM_ADAPTER_TYPE = os.getenv("LLM_ADAPTER", "claude")
-LLM_MODEL = os.getenv("LLM_MODEL")  # 예: claude-sonnet-4-20250514
 GARMIN_EMAIL = os.getenv("GARMIN_USERNAME")
 GARMIN_PASSWORD = os.getenv("GARMIN_PASSWORD")
 GARMIN_TOKEN_DIR = os.path.expanduser("~/.garminconnect")
 BODY_METRICS_CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "inbody.csv")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# LLM 백엔드 설정(config.json) — import 시에는 exit하지 않는다. 오류는 main()이 Discord 토큰 검사 전에 처리.
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
+LLM_CONFIG, LLM_CONFIG_ERROR = load_llm_config_safe(CONFIG_PATH, os.environ)
+# preflight 외부 명령 러너 (테스트는 fake로 교체).
+PREFLIGHT_RUNNER = default_runner
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts")
 MEMORY_MODE = os.getenv("MEMORY_MODE", "auto")  # auto | manual
 # 학습 루프(축4) — off|manual|auto, 기본 off (MEMORY_MODE 미러). 인터랙티브 오너 턴에서만 동작.
@@ -131,34 +141,72 @@ session_index = SessionIndex(SESSION_INDEX_DB_PATH)
 # cron 스케줄러 스토어 (원자적 JSON 영속, 재시작 생존)
 cron_store = CronStore(CRON_JOBS_PATH)
 
-# MCP 서버 생성
-mcp_servers = {}
+# MCP 서버 정의(ServerSpec, transport 중립) — claude는 SDK 인프로세스 서버, codex/grok은 SharedToolServer(HTTP)로 노출.
+server_specs = []
 if garmin:
     garmin_mcp = create_garmin_mcp_server(garmin)
-    mcp_servers["garmin"] = garmin_mcp
+    server_specs.append(garmin_mcp)
     print("✅ Garmin MCP 도구 등록 완료")
 
 body_metrics_mcp = create_body_metrics_mcp_server(body_metrics_mgr)
-mcp_servers["body_metrics"] = body_metrics_mcp
+server_specs.append(body_metrics_mcp)
 
 # 메모리 MCP (LLM 어댑터 생성 전에 등록)
 memory_mgr = MemoryManager(PROMPTS_DIR)
 memory_mcp = create_memory_mcp_server(memory_mgr)
-mcp_servers["memory"] = memory_mcp
+server_specs.append(memory_mcp)
 
 # 세션 검색 MCP (과거 대화 FTS5 전문 검색 → mcp__session_search__search)
 session_search_mcp = create_session_search_mcp_server(session_index)
-mcp_servers["session_search"] = session_search_mcp
+server_specs.append(session_search_mcp)
 
 # 스케줄 MCP (NL cron 스케줄러 CRUD → mcp__schedule__schedule_create 등)
 # deliver 기본 채널 = NOTIFY_CHANNEL_ID. 무인 초기자엔 schedule_list만 노출(allowed_tools 매트릭스).
 schedule_mcp = create_schedule_mcp_server(
     cron_store, default_channel_id=NOTIFY_CHANNEL_ID, max_jobs=MAX_CRON_JOBS
 )
-mcp_servers["schedule"] = schedule_mcp
+server_specs.append(schedule_mcp)
 
-# LLM 어댑터
-llm = create_llm_adapter(LLM_ADAPTER_TYPE, model=LLM_MODEL, mcp_servers=mcp_servers or None, cwd=PROJECT_ROOT)
+
+def _uses_skill_registry() -> bool:
+    """봇 SkillRegistry 사용 여부 — codex/grok 항상, claude는 llm.claude.skills=registry일 때만(기본 native)."""
+    return LLM_CONFIG is not None and LLM_CONFIG.skills_mode == "registry"
+
+
+# 스킬 MCP (registry 모드: mcp__skills__load_skill/read_skill_file). native Claude는 CLI 네이티브 스킬을 쓴다.
+if _uses_skill_registry():
+    server_specs.append(create_skills_mcp_server(SkillRegistry(SKILLS_DIR, backend=LLM_CONFIG.backend)))
+
+
+def build_llm_and_tool_server(config, specs):
+    """선택 백엔드의 도구 transport + LLM 어댑터를 만든다 → (llm, tool_server). 실패 = StartupError.
+
+    권한 라우팅 키 = approve_skill_writes is True → priv 서버 세트/토큰, 그 외 → ro(mutation MCP 서버측 차단).
+    claude: 같은 ServerSpec으로 SDK 인프로세스 priv/ro 세트, tool_server=None.
+    codex/grok: 봇 루프 내 공유 HTTP 도구 서버 — setup_hook에서 llm.start() 전에 기동, 종료 시 정지.
+    """
+    if config.backend == "claude":
+        adapter = create_llm_adapter_from_config(
+            config,
+            mcp_servers=to_sdk_servers(specs, CallerCapability.PRIVILEGED),
+            readonly_mcp_servers=to_sdk_servers(specs, CallerCapability.READ_ONLY),
+            server_specs=specs,
+            cwd=PROJECT_ROOT,
+        )
+        return adapter, None
+    shared = SharedToolServer(specs, backend=config.backend)
+    adapter = create_llm_adapter_from_config(config, server_specs=specs, cwd=PROJECT_ROOT, tool_server=shared)
+    return adapter, shared
+
+
+# LLM 어댑터 (설정 오류면 None — main()이 원인 출력 후 exit 1). tool_server는 codex/grok에서만 생성.
+llm = None
+tool_server = None
+if LLM_CONFIG is not None:
+    try:
+        llm, tool_server = build_llm_and_tool_server(LLM_CONFIG, server_specs)
+    except StartupError as e:
+        LLM_CONFIG_ERROR = e
 
 # add_memory MCP 툴이 용량 초과 시 LLM 통합기를 호출할 수 있도록 사후 주입.
 memory_mgr.llm = llm
@@ -380,8 +428,11 @@ async def build_history_from_thread(
 
 
 def _build_system_prompt() -> str:
-    """시스템 프롬프트 + 목표 + 메모리를 조립."""
+    """시스템 프롬프트 + 목표 + (registry 모드) 스킬 카탈로그 + 메모리를 조립."""
     parts = [load_prompt("system.md"), load_prompt("goals.md")]
+    if _uses_skill_registry():
+        # 매 턴 스캔 — 새로 저장된 스킬도 재시작 없이 카탈로그에 반영.
+        parts.append(SkillRegistry(SKILLS_DIR).catalog_prompt())
     mem = memory_mgr.read_memory()
     usr = memory_mgr.read_user()
     if mem:
@@ -521,6 +572,7 @@ async def handle_health_query(message: discord.Message, content: str, image_path
                 counter=counter,
                 approve_skill_writes=True,
                 thread_id=thread_id,
+                image_paths=image_paths,
             )
         reply_text, superseded = await _steer_and_run(thread_id, _generate)
     await status.clear()
@@ -551,7 +603,7 @@ async def handle_health_query(message: discord.Message, content: str, image_path
         await send_reply(target, SKILL_RESTART_NOTICE.format(names=", ".join(new_skills)))
 
     # 학습 루프 제안 판정 — 인터랙티브 + 성공 + (auto: 도구 5+ / manual: 명시 요청).
-    turn_ok = bool(reply_text) and reply_text != _CLAUDE_FALLBACK_MESSAGE
+    turn_ok = bool(reply_text) and not is_llm_error_reply(reply_text)
     propose = should_propose_skill(
         LEARNING_MODE,
         interactive=True,
@@ -1048,18 +1100,59 @@ _original_client_close = channel._client.close
 
 
 async def _close_with_cleanup():
-    """기본 종료 전에 llm.close_all()로 스레드 클라이언트를 모두 disconnect."""
+    """기본 종료 전에 llm.close_all()로 스레드 클라이언트를 모두 disconnect → 공유 도구 서버 정지."""
     try:
         await llm.close_all()
     except Exception as e:
         print(f"⚠️ 종료 시 세션 정리 실패: {type(e).__name__}: {e}")
+    if tool_server is not None:
+        try:
+            await tool_server.stop()
+        except Exception as e:
+            print(f"⚠️ 종료 시 공유 도구 서버 정지 실패: {type(e).__name__}: {e}")
     await _original_client_close()
 
 
 channel._client.close = _close_with_cleanup
 
 
+# 런타임 핸드셰이크(llm.start) 실패 여부 — setup_hook이 기록하고 main()이 channel.run() 복귀 후 exit 1.
+_STARTUP_FAILED = False
+
+
+def _print_llm_startup_error(error: StartupError):
+    print(f"❌ [LLM] {error.cause}")
+    print(f"   해결: {error.fix}")
+
+
+async def _llm_setup_hook():
+    """Discord 로그인 직후 공유 도구 서버(codex/grok) → LLM 런타임 핸드셰이크 — 실패 시 원인 로그 + 클라이언트 종료."""
+    global _STARTUP_FAILED
+    try:
+        if tool_server is not None:
+            await tool_server.start()
+        await llm.start()
+    except Exception as e:
+        if not isinstance(e, StartupError):
+            e = StartupError(f"LLM 런타임 기동 실패: {type(e).__name__}: {e}", "봇 로그를 확인하세요")
+        _print_llm_startup_error(e)
+        _STARTUP_FAILED = True
+        await channel._client.close()
+
+
+channel._client.setup_hook = _llm_setup_hook
+
+
 def main():
+    # LLM 설정·인증은 Discord 토큰 검사보다 먼저 확인한다(원인 + 해결 명령 출력 후 exit 1).
+    if LLM_CONFIG_ERROR is not None:
+        _print_llm_startup_error(LLM_CONFIG_ERROR)
+        sys.exit(1)
+    try:
+        run_preflight(LLM_CONFIG, os.environ, runner=PREFLIGHT_RUNNER)
+    except StartupError as e:
+        _print_llm_startup_error(e)
+        sys.exit(1)
     if not DISCORD_TOKEN:
         print("❌ DISCORD_BOT_TOKEN이 설정되지 않았습니다. .env 파일을 확인하세요.")
         sys.exit(1)
@@ -1069,6 +1162,8 @@ def main():
     else:
         print("⚠️ ALLOWED_USERS가 비어있습니다. 모든 메시지가 무시됩니다.")
     channel.run()
+    if _STARTUP_FAILED:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
