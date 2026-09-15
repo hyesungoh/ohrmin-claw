@@ -1,20 +1,17 @@
-"""Memory MCP tool 정의 — Claude Agent SDK 인프로세스 서버."""
-from typing import Annotated
-
-from claude_agent_sdk import tool, create_sdk_mcp_server
-
+"""Memory MCP tool 정의 — 백엔드 중립 ServerSpec (transport는 core/tool_server)."""
 from core.garmin_tools import _json_response
+from core.tool_server.spec import ParamSpec, ServerSpec, tool
 
 
 TOOL_REGISTRY: dict = {}
 
 
 def create_memory_mcp_server(memory_manager):
-    """MemoryManager를 감싸는 인프로세스 MCP 서버 생성."""
+    """MemoryManager를 감싸는 MCP 서버 정의(ServerSpec) 생성."""
     TOOL_REGISTRY.clear()
 
     LIST_SCHEMA = {
-        "target": Annotated[str, "조회할 메모리 대상 ('memory' 또는 'user')"],
+        "target": ParamSpec("string", "조회할 메모리 대상 ('memory' 또는 'user')"),
     }
 
     @tool("list_memory", "메모리 엔트리 목록 조회 (현재 사용량 포함)", LIST_SCHEMA)
@@ -31,8 +28,8 @@ def create_memory_mcp_server(memory_manager):
         })
 
     ADD_SCHEMA = {
-        "target": Annotated[str, "저장할 메모리 대상 ('memory' 또는 'user')"],
-        "content": Annotated[str, "저장할 내용"],
+        "target": ParamSpec("string", "저장할 메모리 대상 ('memory' 또는 'user')"),
+        "content": ParamSpec("string", "저장할 내용"),
     }
 
     @tool("add_memory", "메모리 엔트리 추가 (용량 초과 시 LLM이 자동 통합)", ADD_SCHEMA)
@@ -57,9 +54,9 @@ def create_memory_mcp_server(memory_manager):
         return _json_response(consolidated)
 
     REPLACE_SCHEMA = {
-        "target": Annotated[str, "수정할 메모리 대상 ('memory' 또는 'user')"],
-        "index": Annotated[int, "교체할 엔트리 인덱스 (0부터 시작)"],
-        "content": Annotated[str, "새 내용"],
+        "target": ParamSpec("string", "수정할 메모리 대상 ('memory' 또는 'user')"),
+        "index": ParamSpec("integer", "교체할 엔트리 인덱스 (0부터 시작)"),
+        "content": ParamSpec("string", "새 내용"),
     }
 
     @tool("replace_memory", "특정 메모리 엔트리를 새 내용으로 교체", REPLACE_SCHEMA)
@@ -71,8 +68,8 @@ def create_memory_mcp_server(memory_manager):
         return _json_response(result)
 
     REMOVE_SCHEMA = {
-        "target": Annotated[str, "삭제할 메모리 대상 ('memory' 또는 'user')"],
-        "index": Annotated[int, "삭제할 엔트리 인덱스 (0부터 시작)"],
+        "target": ParamSpec("string", "삭제할 메모리 대상 ('memory' 또는 'user')"),
+        "index": ParamSpec("integer", "삭제할 엔트리 인덱스 (0부터 시작)"),
     }
 
     @tool("remove_memory", "특정 메모리 엔트리 삭제", REMOVE_SCHEMA)
@@ -85,7 +82,7 @@ def create_memory_mcp_server(memory_manager):
     all_tools = [list_memory, add_memory, replace_memory, remove_memory]
     TOOL_REGISTRY.update({t.name: t for t in all_tools})
 
-    return create_sdk_mcp_server(
+    return ServerSpec(
         name="memory",
         tools=all_tools,
     )

@@ -32,7 +32,7 @@ def metrics_tools(mock_metrics_manager, metrics_server):
 class TestBodyMetricsMcpServer:
     def test_server_created(self, metrics_server):
         assert metrics_server is not None
-        assert metrics_server["name"] == "body_metrics"
+        assert metrics_server.name == "body_metrics"
 
     def test_has_required_tools(self, metrics_tools):
         assert "add_body_measurement" in metrics_tools

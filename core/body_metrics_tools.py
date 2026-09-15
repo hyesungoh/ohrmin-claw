@@ -1,26 +1,24 @@
-"""Body Metrics MCP tool 정의 — Claude Agent SDK 인프로세스 서버."""
+"""Body Metrics MCP tool 정의 — 백엔드 중립 ServerSpec (transport는 core/tool_server)."""
 import datetime
-from typing import Annotated
-
-from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from core.garmin_tools import _json_response
+from core.tool_server.spec import ParamSpec, ServerSpec, tool
 
 
 TOOL_REGISTRY: dict = {}
 
 
 def create_body_metrics_mcp_server(metrics_manager):
-    """BodyMetricsManager를 감싸는 인프로세스 MCP 서버 생성."""
+    """BodyMetricsManager를 감싸는 MCP 서버 정의(ServerSpec) 생성."""
     TOOL_REGISTRY.clear()
 
     ADD_SCHEMA = {
-        "date": Annotated[str, "측정 날짜 (YYYY-MM-DD). 생략 시 오늘"],
-        "weight_kg": Annotated[float, "체중 (kg)"],
-        "body_fat_pct": Annotated[float, "체지방률 (%)"],
-        "muscle_mass_kg": Annotated[float, "골격근량 (kg)"],
-        "bmi": Annotated[float, "BMI"],
-        "source": Annotated[str, "데이터 출처 (manual, inbody 등). 기본 manual"],
+        "date": ParamSpec("string", "측정 날짜 (YYYY-MM-DD). 생략 시 오늘"),
+        "weight_kg": ParamSpec("number", "체중 (kg)"),
+        "body_fat_pct": ParamSpec("number", "체지방률 (%)"),
+        "muscle_mass_kg": ParamSpec("number", "골격근량 (kg)"),
+        "bmi": ParamSpec("number", "BMI"),
+        "source": ParamSpec("string", "데이터 출처 (manual, inbody 등). 기본 manual"),
     }
 
     @tool("add_body_measurement", "체성분 측정 기록 추가 (최소 1개 필드 필수)", ADD_SCHEMA)
@@ -43,8 +41,8 @@ def create_body_metrics_mcp_server(metrics_manager):
         return _json_response({"status": "ok", "date": date, **provided})
 
     HISTORY_SCHEMA = {
-        "count": Annotated[int, "조회할 최근 기록 수 (기본 10)"],
-        "days": Annotated[int, "최근 N일 이내 기록만 조회 (선택)"],
+        "count": ParamSpec("integer", "조회할 최근 기록 수 (기본 10)"),
+        "days": ParamSpec("integer", "최근 N일 이내 기록만 조회 (선택)"),
     }
 
     @tool("get_body_metrics_history", "체성분 측정 이력 조회 (최근 N건 또는 기간)", HISTORY_SCHEMA)
@@ -59,8 +57,8 @@ def create_body_metrics_mcp_server(metrics_manager):
         return _json_response(all_rows[:count])
 
     TREND_SCHEMA = {
-        "field": Annotated[str, "분석할 필드명 (weight_kg, body_fat_pct, muscle_mass_kg, bmi)"],
-        "days": Annotated[int, "분석 기간 (일, 기본 30)"],
+        "field": ParamSpec("string", "분석할 필드명 (weight_kg, body_fat_pct, muscle_mass_kg, bmi)"),
+        "days": ParamSpec("integer", "분석 기간 (일, 기본 30)"),
     }
 
     @tool("get_body_metrics_trend", "특정 체성분 지표의 트렌드 분석 (기간별 변화)", TREND_SCHEMA)
@@ -83,7 +81,7 @@ def create_body_metrics_mcp_server(metrics_manager):
     all_tools = [add_body_measurement, get_body_metrics_history, get_body_metrics_trend]
     TOOL_REGISTRY.update({t.name: t for t in all_tools})
 
-    return create_sdk_mcp_server(
+    return ServerSpec(
         name="body_metrics",
         tools=all_tools,
     )

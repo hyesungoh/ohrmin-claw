@@ -1,16 +1,14 @@
-"""스케줄 MCP tool 정의 — Claude Agent SDK 인프로세스 서버.
+"""스케줄 MCP tool 정의 — 백엔드 중립 ServerSpec (transport는 core/tool_server).
 
 CronStore를 감싸 예약/반복 작업을 CRUD한다 → mcp__schedule__schedule_create 등.
 입력은 구조화(5필드 cron 문자열 또는 30m/2h/1d 상대) — 자연어→cron 변환은 LLM이 담당한다.
 무인 초기자(cron tick/자동 분석)에는 schedule_list만 노출한다(권한 매트릭스, allowed_tools).
 """
 import datetime
-from typing import Annotated
-
-from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from core.garmin_tools import _json_response
 from core.scheduler import validate_schedule
+from core.tool_server.spec import ParamSpec, ServerSpec, tool
 
 
 TOOL_REGISTRY: dict = {}
@@ -29,7 +27,7 @@ def create_schedule_mcp_server(
     max_jobs: int = DEFAULT_MAX_JOBS,
     now_fn=_local_now,
 ):
-    """CronStore를 감싸는 인프로세스 MCP 서버 생성.
+    """CronStore를 감싸는 MCP 서버 정의(ServerSpec) 생성.
 
     default_channel_id: schedule_create에서 deliver_channel_id 미지정 시 기본 전송 채널.
     max_jobs: 생성 상한(초과 시 거부). now_fn: 테스트 주입용 클록.
@@ -37,14 +35,14 @@ def create_schedule_mcp_server(
     TOOL_REGISTRY.clear()
 
     CREATE_SCHEMA = {
-        "prompt": Annotated[str, "발화 시 실행할 지시(프롬프트). 이 내용으로 에이전트 턴이 실행됨"],
-        "schedule": Annotated[
-            str,
+        "prompt": ParamSpec("string", "발화 시 실행할 지시(프롬프트). 이 내용으로 에이전트 턴이 실행됨"),
+        "schedule": ParamSpec(
+            "string",
             "5필드 cron('0 20 * * 0' = 매주 일 20시) 또는 상대 one-shot('30m'/'2h'/'1d'). "
             "자연어는 호출 전에 cron으로 변환할 것",
-        ],
-        "deliver_channel_id": Annotated[str, "결과 전송 Discord 채널 ID (생략 시 기본 알림 채널)"],
-        "max_turns": Annotated[int, "잡 실행 시 최대 턴 수 (기본 15)"],
+        ),
+        "deliver_channel_id": ParamSpec("string", "결과 전송 Discord 채널 ID (생략 시 기본 알림 채널)"),
+        "max_turns": ParamSpec("integer", "잡 실행 시 최대 턴 수 (기본 15)"),
     }
 
     @tool(
@@ -79,7 +77,7 @@ def create_schedule_mcp_server(
     async def schedule_list(args):
         return _json_response({"jobs": store.list()})
 
-    ID_SCHEMA = {"id": Annotated[str, "대상 스케줄 ID (schedule_list로 조회)"]}
+    ID_SCHEMA = {"id": ParamSpec("string", "대상 스케줄 ID (schedule_list로 조회)")}
 
     @tool("schedule_pause", "스케줄 일시정지 (발화 중단, 삭제 아님)", ID_SCHEMA)
     async def schedule_pause(args):
@@ -111,4 +109,4 @@ def create_schedule_mcp_server(
     ]
     TOOL_REGISTRY.update({t.name: t for t in all_tools})
 
-    return create_sdk_mcp_server(name="schedule", tools=all_tools)
+    return ServerSpec(name="schedule", tools=all_tools)

@@ -50,10 +50,11 @@ def garmin_tools(mock_garmin_client, garmin_server):
 class TestGarminMcpServer:
     def test_server_created(self, garmin_server):
         assert garmin_server is not None
-        assert garmin_server["name"] == "garmin"
+        assert garmin_server.name == "garmin"
 
     def test_server_has_type_sdk(self, garmin_server):
-        assert garmin_server["type"] == "sdk"
+        from core.tool_server.spec import ServerSpec
+        assert isinstance(garmin_server, ServerSpec)
 
     def test_all_basic_tools_registered(self, garmin_tools):
         assert "get_sleep" in garmin_tools

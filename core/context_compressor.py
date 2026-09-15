@@ -1,4 +1,5 @@
 """컨텍스트 압축 — Hermes식 보호 구간 + LLM 요약."""
+from core.llm_errors import LLMError
 
 COMPRESS_PROMPT = """\
 다음은 사용자와 AI 건강 코치의 대화 중간 부분입니다.
@@ -62,7 +63,11 @@ class ContextCompressor:
             for m in middle
         )
         prompt = COMPRESS_PROMPT.format(conversation=conv_text)
-        summary = await llm.ask("컨텍스트 압축기", prompt)
+        try:
+            summary = await llm.ask("컨텍스트 압축기", prompt)
+        except LLMError:
+            # 요약 실패 시 오류 문자열을 요약으로 끼워 넣지 않고 원본 이력을 그대로 쓴다.
+            return messages
 
         summary_msg = {
             "role": "system",
