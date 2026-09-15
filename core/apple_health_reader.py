@@ -11,6 +11,12 @@ METRIC_MAP = {
     "body_mass_index": "bmi",
 }
 
+# 노이즈 측정으로 확인된 날짜(YYYY-MM-DD). 이 날짜의 InBody 데이터는 upsert 대상에서 제외.
+# iPhone Health Auto Export가 재-export 해도 CSV로 유입되지 않음.
+IGNORE_DATES: set[str] = {
+    "2026-07-18",  # BIA 튀는 값 (체지방률 +1.5%p, FFM -1.9kg) — 노이즈 확인됨
+}
+
 
 def sync_from_icloud(hae_dir: str, body_metrics_mgr: BodyMetricsManager) -> list[dict]:
     """iCloud Drive의 Health Auto Export JSON을 읽어 inbody.csv에 upsert.
@@ -44,6 +50,8 @@ def sync_from_icloud(hae_dir: str, body_metrics_mgr: BodyMetricsManager) -> list
                 row["date"] = valid[-1]["date"][:10]
 
         if row.get("date"):
+            if row["date"] in IGNORE_DATES:
+                continue
             row["source"] = "apple_health"
             is_new = (row["date"], row["source"]) not in existing
             body_metrics_mgr.upsert_entry(**row)

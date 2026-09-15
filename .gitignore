@@ -9,3 +9,6 @@ prompts/user.md
 data/
 backups/
 .claude/*.lock
+# 에이전트 생성 스킬(런타임). 버전관리를 원하면 이 줄을 지우세요.
+# (.claude/skills/ 아래 생성되는 심링크는 startup 시 재생성되는 파생물이라 커밋 불필요)
+.agent-made/
